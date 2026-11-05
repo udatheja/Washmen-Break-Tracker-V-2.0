@@ -127,10 +127,12 @@ const singleFileHtml = `<!doctype html>
 </html>`;
 
 fs.writeFileSync('index.html', singleFileHtml, 'utf8');
+fs.writeFileSync('404.html', singleFileHtml, 'utf8');
 fs.writeFileSync('washmen-break-tracker.html', singleFileHtml, 'utf8');
 if (!fs.existsSync('public')) fs.mkdirSync('public', { recursive: true });
 fs.writeFileSync(path.join('public', 'washmen-break-tracker.html'), singleFileHtml, 'utf8');
 fs.writeFileSync(path.join('dist', 'index.html'), singleFileHtml, 'utf8');
+fs.writeFileSync(path.join('dist', '404.html'), singleFileHtml, 'utf8');
 fs.writeFileSync(path.join('dist', 'washmen-break-tracker.html'), singleFileHtml, 'utf8');
 
 console.log('Built self-contained single-file release successfully:', {
