@@ -1,0 +1,6 @@
+{
+  "name": "Washmen Laundry - Wash & Fold Break Tracker",
+  "description": "Employee break time management system for Washmen Laundry Wash & Fold Department with shift management, live countdown timers, supervisor overrides, and audit reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

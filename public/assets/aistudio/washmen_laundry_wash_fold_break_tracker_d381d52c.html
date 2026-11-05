@@ -1,0 +1,1676 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-50 text-slate-800">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Washmen Laundry - Wash & Fold Break Tracker</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        washmen: {
+                            50: '#F6F7FC',
+                            100: '#EEECFB',
+                            500: '#4D3FDC',
+                            600: '#3E30CE',
+                            700: '#2E22B0',
+                            800: '#251B7C',
+                            900: '#171262',
+                            navy: '#251B7C',
+                            cyan: '#4D3FDC'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- FontAwesome for clean iconography -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .pulse-alarm {
+            animation: pulse-red 1.5s infinite;
+        }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        /* Custom scrollbars */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="h-full flex flex-col antialiased selection:bg-[#4D3FDC] selection:text-white bg-[#F6F7FC]">
+
+    <!-- TOP HEADER / BRANDING BAR (OFFICIAL WASHMEN #251B7C) -->
+    <header class="bg-[#251B7C] text-white border-b border-[#1E1668] sticky top-0 z-30 shadow-md">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+            
+            <!-- Brand & Logo -->
+            <div class="flex items-center space-x-3.5">
+                <div class="w-12 h-12 bg-[#001399] rounded-xl flex items-center justify-center shadow-md p-1 border border-cyan-400/30">
+                    <img src="/washmen-logo.png" alt="Washmen Laundry" class="w-full h-full object-contain rounded-lg">
+                </div>
+                <div>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="text-xl font-black tracking-tight text-white">WASHMEN</h1>
+                        <span class="px-2 py-0.5 text-[10px] uppercase tracking-wider font-extrabold bg-washmen-500 text-slate-900 rounded-md">LAUNDRY</span>
+                    </div>
+                    <p class="text-xs text-slate-400 font-medium">Department: <span class="text-washmen-cyan font-semibold">Wash & Fold</span></p>
+                </div>
+            </div>
+
+            <!-- Shift Switcher & Live Clock -->
+            <div class="flex items-center flex-wrap gap-3">
+                <!-- Shift Selector Button Group -->
+                <div class="bg-slate-800 p-1 rounded-xl border border-slate-700 flex items-center space-x-1">
+                    <button id="btnShiftMorning" onclick="setShift('Morning')" class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center space-x-1.5">
+                        <i class="fa-solid fa-sun text-amber-400"></i>
+                        <span>Morning Shift</span>
+                    </button>
+                    <button id="btnShiftNight" onclick="setShift('Night')" class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center space-x-1.5">
+                        <i class="fa-solid fa-moon text-indigo-400"></i>
+                        <span>Night Shift</span>
+                    </button>
+                </div>
+
+                <!-- Live Date & Clock -->
+                <div class="bg-slate-800/80 px-3.5 py-1.5 rounded-xl border border-slate-700/60 text-right min-w-[140px]">
+                    <div id="liveDate" class="text-[11px] text-slate-400 font-medium uppercase tracking-wider">Loading date...</div>
+                    <div id="liveClock" class="text-sm font-bold font-mono text-washmen-cyan">00:00:00 AM</div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- NAVIGATION BAR -->
+    <nav class="bg-white border-b border-slate-200 shadow-sm sticky top-[65px] z-20">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex space-x-1 overflow-x-auto py-2" id="navTabs">
+                <button onclick="switchTab('dashboard')" id="tab-dashboard" class="tab-btn px-4 py-2 text-sm font-semibold rounded-lg flex items-center space-x-2 text-washmen-600 bg-washmen-50">
+                    <i class="fa-solid fa-gauge-high"></i>
+                    <span>Live Dashboard</span>
+                    <span id="activeCountBadge" class="ml-1 px-1.5 py-0.5 text-xs font-bold bg-washmen-600 text-white rounded-full">0</span>
+                </button>
+                <button onclick="switchTab('roster')" id="tab-roster" class="tab-btn px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center space-x-2">
+                    <i class="fa-solid fa-users"></i>
+                    <span>Staff Roster</span>
+                </button>
+                <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center space-x-2">
+                    <i class="fa-solid fa-list-check"></i>
+                    <span>Daily Break Logs</span>
+                </button>
+                <button onclick="switchTab('report')" id="tab-report" class="tab-btn px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center space-x-2">
+                    <i class="fa-solid fa-chart-column"></i>
+                    <span>Monthly Reports</span>
+                </button>
+                <button onclick="switchTab('settings')" id="tab-settings" class="tab-btn px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center space-x-2">
+                    <i class="fa-solid fa-sliders"></i>
+                    <span>Settings & Backup</span>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- MAIN CONTENT CONTAINER -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+        <!-- ================= TAB 1: LIVE DASHBOARD ================= -->
+        <div id="view-dashboard" class="space-y-6">
+
+            <!-- KPI STATS OVERVIEW CARDS -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                
+                <!-- KPI 1: Active Breaks -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+                    <div class="p-3.5 bg-amber-50 text-amber-600 rounded-xl">
+                        <i class="fa-solid fa-stopwatch text-2xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Active Breaks Now</p>
+                        <h3 id="statActiveBreaks" class="text-2xl font-black text-slate-900">0</h3>
+                        <p class="text-[11px] text-slate-400">Currently on break</p>
+                    </div>
+                </div>
+
+                <!-- KPI 2: Completed Today -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+                    <div class="p-3.5 bg-emerald-50 text-emerald-600 rounded-xl">
+                        <i class="fa-solid fa-circle-check text-2xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Breaks Taken Today</p>
+                        <h3 id="statBreaksToday" class="text-2xl font-black text-slate-900">0</h3>
+                        <p class="text-[11px] text-slate-400">Shift total</p>
+                    </div>
+                </div>
+
+                <!-- KPI 3: Overtime Warnings -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+                    <div class="p-3.5 bg-rose-50 text-rose-600 rounded-xl">
+                        <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Overtime / Late Breaks</p>
+                        <h3 id="statOvertimeToday" class="text-2xl font-black text-rose-600">0</h3>
+                        <p class="text-[11px] text-slate-400">Exceeded 20m allotment</p>
+                    </div>
+                </div>
+
+                <!-- KPI 4: Active Roster Count -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center space-x-4">
+                    <div class="p-3.5 bg-blue-50 text-blue-600 rounded-xl">
+                        <i class="fa-solid fa-user-group text-2xl"></i>
+                    </div>
+                    <div>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wider">Shift Staff On Duty</p>
+                        <h3 id="statShiftStaff" class="text-2xl font-black text-slate-900">20</h3>
+                        <p class="text-[11px] text-slate-400" id="statShiftName">Morning Shift</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QUICK BREAK LAUNCHER BAR -->
+            <div class="bg-gradient-to-r from-slate-900 via-slate-800 to-washmen-900 p-6 rounded-2xl shadow-lg text-white">
+                <div class="flex items-center space-x-2 mb-4">
+                    <div class="w-8 h-8 rounded-lg bg-washmen-500 flex items-center space-x-1 justify-center text-slate-900">
+                        <i class="fa-solid fa-bolt text-sm"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-bold">Quick Start Break Timer</h2>
+                        <p class="text-xs text-slate-300">Select an employee and launch their 20-minute allotted break counter.</p>
+                    </div>
+                </div>
+
+                <form id="startBreakForm" onsubmit="handleStartBreak(event)" class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                    <!-- Staff Select -->
+                    <div class="sm:col-span-5">
+                        <label class="block text-xs font-medium text-slate-300 mb-1">Select Staff Member</label>
+                        <select id="quickStaffSelect" required class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-washmen-500 focus:outline-none">
+                            <option value="">-- Choose Employee --</option>
+                        </select>
+                    </div>
+
+                    <!-- Break Type Select -->
+                    <div class="sm:col-span-4">
+                        <label class="block text-xs font-medium text-slate-300 mb-1">Select Break Type (20m Allotted)</label>
+                        <select id="quickBreakType" required class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-washmen-500 focus:outline-none">
+                            <option value="Breakfast">Breakfast (20 min)</option>
+                            <option value="Lunch">Lunch (20 min)</option>
+                            <option value="Tea">Tea Break (20 min)</option>
+                        </select>
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="sm:col-span-3">
+                        <button type="submit" class="w-full bg-gradient-to-r from-washmen-500 to-washmen-cyan hover:from-washmen-600 hover:to-washmen-500 text-slate-900 font-bold py-2.5 px-4 rounded-xl shadow-md transition-all flex items-center justify-center space-x-2">
+                            <i class="fa-solid fa-play"></i>
+                            <span>Start Break</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- LIVE ACTIVE TIMERS GRID -->
+            <div>
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center space-x-2">
+                        <h2 class="text-lg font-bold text-slate-900">Live Active Break Timers</h2>
+                        <span class="text-xs px-2.5 py-1 bg-slate-200 text-slate-700 rounded-full font-semibold" id="activeTimersCount">0 Active</span>
+                    </div>
+                    <span class="text-xs text-slate-500">Updates live in real-time</span>
+                </div>
+
+                <!-- Timer Cards Grid -->
+                <div id="activeTimersGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- Dynamic active timer cards inserted here -->
+                </div>
+
+                <!-- Empty State -->
+                <div id="emptyActiveTimers" class="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center text-slate-400">
+                    <i class="fa-solid fa-mug-hot text-4xl mb-3 text-slate-300"></i>
+                    <p class="font-medium text-slate-600">No active break timers currently running.</p>
+                    <p class="text-xs text-slate-400 mt-1">Use the quick start bar above to log a staff break.</p>
+                </div>
+            </div>
+
+            <!-- QUICK SHIFT BREAK MATRIX TABLE -->
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="p-4 sm:p-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                        <h3 class="font-bold text-slate-900">Today's Shift Break Matrix</h3>
+                        <p class="text-xs text-slate-500">Quick status of staff break entitlement (3 x 20m breaks = 60m total)</p>
+                    </div>
+                    <div class="flex items-center space-x-3 text-xs">
+                        <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block mr-1"></span> Taken</span>
+                        <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block mr-1"></span> In Progress</span>
+                        <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-slate-300 inline-block mr-1"></span> Pending</span>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-50 text-slate-600 text-xs uppercase font-semibold border-b border-slate-200">
+                            <tr>
+                                <th class="px-4 py-3">Employee Name</th>
+                                <th class="px-4 py-3">Shift</th>
+                                <th class="px-4 py-3 text-center">Breakfast (20m)</th>
+                                <th class="px-4 py-3 text-center">Lunch (20m)</th>
+                                <th class="px-4 py-3 text-center">Tea (20m)</th>
+                                <th class="px-4 py-3 text-center">Total Used Today</th>
+                                <th class="px-4 py-3 text-right">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matrixTableBody" class="divide-y divide-slate-100">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ================= TAB 2: STAFF ROSTER ================= -->
+        <div id="view-roster" class="hidden space-y-6">
+            
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-xl font-bold text-slate-900">Staff Roster Management</h2>
+                    <p class="text-xs text-slate-500">Wash & Fold Department Staff Roster (Morning & Night Shifts)</p>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <button onclick="openAddStaffModal()" class="bg-washmen-600 hover:bg-washmen-700 text-white font-medium px-4 py-2 rounded-xl text-sm shadow-sm transition flex items-center space-x-2">
+                        <i class="fa-solid fa-user-plus"></i>
+                        <span>Add New Employee</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Roster Filters & Table Card -->
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="p-4 border-b border-slate-200 bg-slate-50/50 flex flex-wrap gap-3 justify-between items-center">
+                    <div class="relative flex-1 min-w-[240px]">
+                        <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-xs"></i>
+                        <input type="text" id="rosterSearch" oninput="renderRosterTable()" placeholder="Search staff by name..." class="w-full pl-9 pr-3 py-2 text-sm bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-washmen-500">
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <label class="text-xs text-slate-500 font-medium">Filter Shift:</label>
+                        <select id="rosterShiftFilter" onchange="renderRosterTable()" class="bg-white border border-slate-200 text-slate-700 text-sm rounded-xl px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-washmen-500">
+                            <option value="Current">Current Active Shift</option>
+                            <option value="All">All Shifts</option>
+                            <option value="Morning">Morning Shift Only</option>
+                            <option value="Night">Night Shift Only</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-50 text-slate-600 text-xs uppercase font-semibold border-b border-slate-200">
+                            <tr>
+                                <th class="px-5 py-3.5">#</th>
+                                <th class="px-5 py-3.5">Employee Name</th>
+                                <th class="px-5 py-3.5">Shift</th>
+                                <th class="px-5 py-3.5">Department</th>
+                                <th class="px-5 py-3.5 text-center">Status Today</th>
+                                <th class="px-5 py-3.5 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rosterTableBody" class="divide-y divide-slate-100">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= TAB 3: DAILY BREAK LOGS ================= -->
+        <div id="view-logs" class="hidden space-y-6">
+            
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-xl font-bold text-slate-900">Daily Break Logs</h2>
+                    <p class="text-xs text-slate-500">Audit trail of all break durations and supervisor exceptions</p>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button onclick="exportLogsToCSV()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-4 py-2 rounded-xl text-sm shadow-sm transition flex items-center space-x-2">
+                        <i class="fa-solid fa-file-csv"></i>
+                        <span>Export Logs (Google Sheets CSV)</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Log Filter Toolbar -->
+            <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Date</label>
+                    <input type="date" id="logDateFilter" onchange="renderLogsTable()" class="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:ring-2 focus:ring-washmen-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Shift</label>
+                    <select id="logShiftFilter" onchange="renderLogsTable()" class="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:ring-2 focus:ring-washmen-500">
+                        <option value="All">All Shifts</option>
+                        <option value="Morning">Morning Shift</option>
+                        <option value="Night">Night Shift</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Break Type</label>
+                    <select id="logBreakTypeFilter" onchange="renderLogsTable()" class="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:ring-2 focus:ring-washmen-500">
+                        <option value="All">All Types</option>
+                        <option value="Breakfast">Breakfast</option>
+                        <option value="Lunch">Lunch</option>
+                        <option value="Tea">Tea</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-500 mb-1">Search Employee</label>
+                    <input type="text" id="logSearchInput" oninput="renderLogsTable()" placeholder="Name..." class="w-full bg-slate-50 border border-slate-200 text-slate-800 text-xs rounded-xl px-3 py-2 focus:ring-2 focus:ring-washmen-500">
+                </div>
+            </div>
+
+            <!-- Logs Table Card -->
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-50 text-slate-600 text-xs uppercase font-semibold border-b border-slate-200">
+                            <tr>
+                                <th class="px-4 py-3">Timestamp / Date</th>
+                                <th class="px-4 py-3">Shift</th>
+                                <th class="px-4 py-3">Employee Name</th>
+                                <th class="px-4 py-3">Break Type</th>
+                                <th class="px-4 py-3">Start - End</th>
+                                <th class="px-4 py-3 text-center">Actual Duration</th>
+                                <th class="px-4 py-3 text-center">Variance (+/-)</th>
+                                <th class="px-4 py-3">Supervisor Exception / Status</th>
+                                <th class="px-4 py-3 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsTableBody" class="divide-y divide-slate-100">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="emptyLogs" class="p-8 text-center text-slate-400 text-sm hidden">
+                    No break log entries recorded for the selected filter criteria.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ================= TAB 4: MONTHLY REPORTS ================= -->
+        <div id="view-report" class="hidden space-y-6">
+            
+            <div class="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                    <h2 class="text-xl font-bold text-slate-900">Monthly Variance & Adherence Report</h2>
+                    <p class="text-xs text-slate-500">Comprehensive summary comparing allotted vs actual break times used per staff member</p>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button onclick="exportMonthlyReportToCSV()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-4 py-2 rounded-xl text-sm shadow-sm transition flex items-center space-x-2">
+                        <i class="fa-solid fa-file-excel"></i>
+                        <span>Export Monthly Summary (CSV)</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Month Selection & Filter Card -->
+            <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-center space-x-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-500 mb-1">Select Month & Year</label>
+                        <input type="month" id="reportMonthPicker" onchange="renderMonthlyReport()" class="bg-slate-50 border border-slate-300 text-slate-900 font-bold text-sm rounded-xl px-3.5 py-2 focus:ring-2 focus:ring-washmen-500">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-500 mb-1">Shift</label>
+                        <select id="reportShiftFilter" onchange="renderMonthlyReport()" class="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-xl px-3 py-2 focus:ring-2 focus:ring-washmen-500">
+                            <option value="All">All Shifts</option>
+                            <option value="Morning">Morning Shift</option>
+                            <option value="Night">Night Shift</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Aggregate Stats -->
+                <div class="flex items-center space-x-6 text-right">
+                    <div>
+                        <p class="text-xs text-slate-400 font-medium">Total Breaks Taken</p>
+                        <p id="repTotalBreaks" class="text-lg font-black text-slate-800">0</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-medium">Total Allotted Time</p>
+                        <p id="repTotalAllotted" class="text-lg font-black text-slate-800">0 hrs</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-400 font-medium">Net Variance</p>
+                        <p id="repNetVariance" class="text-lg font-black text-emerald-600">0 min</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Monthly Report Table -->
+            <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-50 text-slate-600 text-xs uppercase font-semibold border-b border-slate-200">
+                            <tr>
+                                <th class="px-4 py-3.5">Employee Name</th>
+                                <th class="px-4 py-3.5">Shift</th>
+                                <th class="px-4 py-3.5 text-center">Monthly Allotment</th>
+                                <th class="px-4 py-3.5 text-center">Total Consumed Time</th>
+                                <th class="px-4 py-3.5 text-center">Net Hours (vs 26:00h)</th>
+                                <th class="px-4 py-3.5 text-center">Adherence & Warnings</th>
+                            </tr>
+                        </thead>
+                        <tbody id="monthlyReportTableBody" class="divide-y divide-slate-100">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ================= TAB 5: SETTINGS & BACKUP ================= -->
+        <div id="view-settings" class="hidden space-y-6">
+            
+            <div class="max-w-3xl mx-auto space-y-6">
+                <div>
+                    <h2 class="text-xl font-bold text-slate-900">Settings & Data Management</h2>
+                    <p class="text-xs text-slate-500">Configure application defaults, sample data reset, and JSON backups</p>
+                </div>
+
+                <!-- Backup & Restore Card -->
+                <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                    <h3 class="font-bold text-slate-800 flex items-center space-x-2">
+                        <i class="fa-solid fa-database text-washmen-600"></i>
+                        <span>Data Storage & Backups</span>
+                    </h3>
+                    <p class="text-xs text-slate-500">All data is locally saved in your web browser. You can export a full database backup or restore data when switching computers.</p>
+                    
+                    <div class="flex flex-wrap gap-3 pt-2">
+                        <button onclick="exportDatabaseJSON()" class="bg-slate-800 hover:bg-slate-900 text-white font-medium px-4 py-2 rounded-xl text-xs transition flex items-center space-x-2">
+                            <i class="fa-solid fa-download"></i>
+                            <span>Export Full Backup (JSON)</span>
+                        </button>
+                        <label class="bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium px-4 py-2 rounded-xl text-xs transition cursor-pointer flex items-center space-x-2">
+                            <i class="fa-solid fa-upload"></i>
+                            <span>Restore Backup (JSON)</span>
+                            <input type="file" id="jsonFileInput" onchange="importDatabaseJSON(event)" accept=".json" class="hidden">
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Reset Sample Data Card -->
+                <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                    <h3 class="font-bold text-rose-600 flex items-center space-x-2">
+                        <i class="fa-solid fa-rotate-left"></i>
+                        <span>Reset Default Roster & Sample Logs</span>
+                    </h3>
+                    <p class="text-xs text-slate-500">Restore default 20 Morning and 20 Night staff members and clear active break timers.</p>
+
+                    <div>
+                        <button onclick="confirmResetData()" class="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-semibold px-4 py-2 rounded-xl text-xs transition">
+                            Reset App Data to Defaults
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- FOOTER WITH PERMANENT CREATED BY LABEL & COPYRIGHT -->
+    <footer class="bg-slate-900 border-t border-slate-800 py-4 mt-auto text-slate-400 text-xs">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-3">
+            <div class="flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div class="flex items-center space-x-2">
+                    <span class="font-semibold text-slate-200 lowercase">washmen</span>
+                    <span>•</span>
+                    <span>Wash & Fold Department Break System</span>
+                </div>
+
+                <!-- PERMANENT "CREATED BY UDARA FERNANDO" LABEL WITH LINK TO LINKEDIN -->
+                <a href="https://www.linkedin.com/in/udara-fernando-076b76bb" target="_blank" rel="noopener noreferrer" class="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-slate-800 hover:bg-slate-750 border border-slate-700 hover:border-cyan-400 shadow-inner transition cursor-pointer text-decoration-none group">
+                    <span class="w-2 h-2 rounded-full bg-washmen-cyan animate-pulse"></span>
+                    <span class="text-[11px] uppercase tracking-wider font-semibold text-slate-400 group-hover:text-slate-300">Created By</span>
+                    <span class="text-xs font-bold text-white group-hover:text-cyan-300 tracking-wide flex items-center gap-1.5">
+                        Udara Fernando
+                        <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-cyan-400 group-hover:translate-x-0.5 transition-transform"></i>
+                    </span>
+                </a>
+            </div>
+
+            <!-- CENTER ONLY COPYRIGHT -->
+            <div class="pt-2.5 border-t border-slate-800 text-center text-slate-400 text-xs font-medium tracking-wide">
+                © 2026 Washmen. All rights reserved.
+            </div>
+        </div>
+    </footer>
+
+
+    <!-- ================= MODALS ================= -->
+
+    <!-- 1. STOP BREAK & SUPERVISOR EXCEPTION MODAL -->
+    <div id="stopBreakModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-100 animate-in fade-in zoom-in-95 duration-200">
+            <!-- Modal Header -->
+            <div class="bg-slate-900 text-white p-5 flex items-center justify-between">
+                <div class="flex items-center space-x-2.5">
+                    <div class="p-2 bg-washmen-600 rounded-lg text-white">
+                        <i class="fa-solid fa-user-clock"></i>
+                    </div>
+                    <div>
+                        <h3 class="font-bold text-base">Complete / Stop Break</h3>
+                        <p class="text-xs text-slate-300" id="stopModalEmployeeName">Employee Name</p>
+                    </div>
+                </div>
+                <button onclick="closeStopModal()" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- Modal Content -->
+            <div class="p-6 space-y-4">
+                <!-- Recorded Stats Summary Box -->
+                <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 grid grid-cols-3 gap-2 text-center">
+                    <div>
+                        <span class="block text-[11px] text-slate-400 uppercase font-medium">Break Type</span>
+                        <span id="stopModalBreakType" class="text-xs font-bold text-slate-800">Breakfast</span>
+                    </div>
+                    <div>
+                        <span class="block text-[11px] text-slate-400 uppercase font-medium">Timer Elapsed</span>
+                        <span id="stopModalElapsed" class="text-xs font-bold text-slate-900 font-mono">22:15</span>
+                    </div>
+                    <div>
+                        <span class="block text-[11px] text-slate-400 uppercase font-medium">Allotted</span>
+                        <span class="text-xs font-bold text-slate-800">20:00 min</span>
+                    </div>
+                </div>
+
+                <!-- Supervisor Exception Dropdown -->
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">
+                        Supervisor Exception / Return Scenario <span class="text-rose-500">*</span>
+                    </label>
+                    <select id="supervisorReasonSelect" onchange="handleExceptionReasonChange()" class="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 font-medium focus:ring-2 focus:ring-washmen-500 focus:outline-none">
+                        <option value="Normal">Normal (Returned on time)</option>
+                        <option value="Supervisor Forgot">Employee returned on time, but supervisor forgot to stop timer</option>
+                        <option value="Returned Late">Employee returned late</option>
+                        <option value="Approved Extended">Approved extended break (operational / shift delay)</option>
+                        <option value="Interrupted Early">Break interrupted early (recalled to wash floor)</option>
+                        <option value="Manual Override">Manual duration override</option>
+                    </select>
+                </div>
+
+                <!-- Dynamic Input Box when Supervisor Correction is selected -->
+                <div id="customDurationBox" class="p-3.5 bg-amber-50 border border-amber-200 rounded-xl space-y-2 hidden">
+                    <label class="block text-xs font-semibold text-amber-900">
+                        Enter Actual Duration Used (Minutes):
+                    </label>
+                    <div class="flex items-center space-x-2">
+                        <input type="number" id="customMinutesInput" min="1" max="180" value="20" class="w-full bg-white border border-amber-300 text-slate-900 text-sm font-bold rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-amber-500">
+                        <span class="text-xs font-semibold text-amber-800">minutes</span>
+                    </div>
+                    <p class="text-[11px] text-amber-700">This value will overwrite the raw timer elapsed time in official logs.</p>
+                </div>
+
+                <!-- Supervisor Notes -->
+                <div>
+                    <label class="block text-xs font-medium text-slate-600 mb-1">Supervisor Notes (Optional)</label>
+                    <textarea id="supervisorNotes" rows="2" placeholder="Add details or reason..." class="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs focus:ring-2 focus:ring-washmen-500 focus:bg-white"></textarea>
+                </div>
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="bg-slate-50 px-6 py-4 border-t border-slate-200 flex justify-end space-x-2">
+                <button onclick="closeStopModal()" class="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl transition">Cancel</button>
+                <button onclick="saveCompletedBreak()" class="px-5 py-2 text-xs font-bold bg-washmen-600 hover:bg-washmen-700 text-white rounded-xl shadow-sm transition">
+                    Confirm & Save Break Log
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. ADD/EDIT STAFF MODAL -->
+    <div id="staffModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-100">
+            <div class="bg-slate-900 text-white p-5 flex items-center justify-between">
+                <h3 class="font-bold text-base" id="staffModalTitle">Add New Staff Member</h3>
+                <button onclick="closeStaffModal()" class="text-slate-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <form onsubmit="handleSaveStaff(event)" class="p-6 space-y-4">
+                <input type="hidden" id="staffEditId">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">Full Employee Name</label>
+                    <input type="text" id="staffInputName" required placeholder="e.g. Rahul Sharma" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-sm focus:ring-2 focus:ring-washmen-500 focus:bg-white">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-700 mb-1">Assigned Shift</label>
+                    <select id="staffInputShift" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2 text-sm focus:ring-2 focus:ring-washmen-500">
+                        <option value="Morning">Morning Shift</option>
+                        <option value="Night">Night Shift</option>
+                    </select>
+                </div>
+                <div class="pt-2 flex justify-end space-x-2">
+                    <button type="button" onclick="closeStaffModal()" class="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-200 rounded-xl">Cancel</button>
+                    <button type="submit" class="px-5 py-2 text-xs font-bold bg-washmen-600 hover:bg-washmen-700 text-white rounded-xl shadow-sm">Save Employee</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION BANNER CONTAINER -->
+    <div id="toastContainer" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+    <!-- APPLICATION JAVASCRIPT LOGIC -->
+    <script>
+        // ================= APPLICATION STATE =================
+        const STORAGE_KEY = 'washmen_break_tracker_v3';
+
+        // Official 16 Morning staff and 18 Night staff for Wash & Fold Department
+        const DEFAULT_MORNING_STAFF = [
+            "Prem Rathod",
+            "Sharif Chowdhury",
+            "Adarsh Nirmal",
+            "Ezra Opondo",
+            "Udara Fernando",
+            "Jitendra Teli",
+            "Ziyaurrahman",
+            "Sandip Kumar",
+            "Abdulah Liaquat",
+            "Suman BK",
+            "Pallabi Mitra",
+            "Neelas kumar",
+            "Vittu Kumar",
+            "Ajith Kumar",
+            "Anita Karki",
+            "Binita Lama"
+        ];
+
+        const DEFAULT_NIGHT_STAFF = [
+            "Aqeeb Rashid",
+            "Raymart lsit Adolfo",
+            "Jack",
+            "Narayan bhandri",
+            "Bhavesh Kumar",
+            "Chok Bahadur",
+            "Shekar Chitlapally",
+            "Sujit jana",
+            "Srikanth Chakali",
+            "Nikhil",
+            "Gokul Kumar",
+            "Aman Kumar",
+            "Harish Ahmed",
+            "Anand Kumar",
+            "Nichale",
+            "Carine Ngeum",
+            "Rita Rijal",
+            "Manoj Lankadasari"
+        ];
+
+        let state = {
+            currentShift: 'Morning',
+            staff: [],
+            activeBreaks: [], // [{ id, staffId, staffName, shift, breakType, startTime, allottedMins }]
+            logs: []          // [{ id, staffId, staffName, shift, breakType, startTime, endTime, durationMins, allottedMins, varianceMins, exceptionReason, notes, date }]
+        };
+
+        let activeStopBreakId = null;
+
+        // ================= INITIALIZATION =================
+        window.onload = function() {
+            loadData();
+            startLiveClock();
+            setInterval(updateTimersUI, 1000); // 1-second live ticker
+            
+            // Set current month in report picker
+            const now = new Date();
+            const yearMonth = now.toISOString().slice(0, 7);
+            document.getElementById('reportMonthPicker').value = yearMonth;
+            document.getElementById('logDateFilter').value = now.toISOString().slice(0, 10);
+
+            // Initial UI Renders
+            updateShiftUI();
+            populateQuickStaffDropdown();
+            renderDashboard();
+            renderRosterTable();
+            renderLogsTable();
+            renderMonthlyReport();
+        };
+
+        // Load or initialize data from LocalStorage
+        function loadData() {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+                try {
+                    state = JSON.parse(saved);
+                } catch(e) {
+                    console.error("Failed to parse saved state", e);
+                    initDefaultData();
+                }
+            } else {
+                initDefaultData();
+            }
+        }
+
+        function initDefaultData() {
+            state.staff = [];
+            
+            DEFAULT_MORNING_STAFF.forEach((name, idx) => {
+                state.staff.push({ id: 'M_' + (idx + 1), name: name, shift: 'Morning', department: 'Wash & Fold', active: true });
+            });
+
+            DEFAULT_NIGHT_STAFF.forEach((name, idx) => {
+                state.staff.push({ id: 'N_' + (idx + 1), name: name, shift: 'Night', department: 'Wash & Fold', active: true });
+            });
+
+            state.activeBreaks = [];
+            state.logs = [];
+            saveData();
+        }
+
+        function saveData() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        }
+
+        // ================= CLOCK & SHIFT SWITCHER =================
+        function startLiveClock() {
+            function updateClock() {
+                const now = new Date();
+                document.getElementById('liveClock').textContent = now.toLocaleTimeString('en-US', { hour12: true });
+                document.getElementById('liveDate').textContent = now.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+            }
+            updateClock();
+            setInterval(updateClock, 1000);
+        }
+
+        function setShift(shiftName) {
+            state.currentShift = shiftName;
+            updateShiftUI();
+            populateQuickStaffDropdown();
+            renderDashboard();
+            renderRosterTable();
+            showToast(`Switched view to ${shiftName} Shift`, 'info');
+        }
+
+        function updateShiftUI() {
+            const btnMorning = document.getElementById('btnShiftMorning');
+            const btnNight = document.getElementById('btnShiftNight');
+
+            if (state.currentShift === 'Morning') {
+                btnMorning.className = "px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center space-x-1.5 bg-amber-400 text-slate-900 shadow-sm";
+                btnNight.className = "px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center space-x-1.5 text-slate-400 hover:text-white";
+            } else {
+                btnNight.className = "px-3 py-1.5 text-xs font-bold rounded-lg transition-all duration-200 flex items-center space-x-1.5 bg-indigo-500 text-white shadow-sm";
+                btnMorning.className = "px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-200 flex items-center space-x-1.5 text-slate-400 hover:text-white";
+            }
+
+            document.getElementById('statShiftName').textContent = `${state.currentShift} Shift`;
+        }
+
+        // ================= NAVIGATION TABS =================
+        function switchTab(tabId) {
+            const tabs = ['dashboard', 'roster', 'logs', 'report', 'settings'];
+            tabs.forEach(t => {
+                const view = document.getElementById(`view-${t}`);
+                const btn = document.getElementById(`tab-${t}`);
+                if (t === tabId) {
+                    view.classList.remove('hidden');
+                    btn.className = "tab-btn px-4 py-2 text-sm font-semibold rounded-lg flex items-center space-x-2 text-washmen-600 bg-washmen-50 shadow-sm";
+                } else {
+                    view.classList.add('hidden');
+                    btn.className = "tab-btn px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg flex items-center space-x-2";
+                }
+            });
+
+            if (tabId === 'logs') renderLogsTable();
+            if (tabId === 'report') renderMonthlyReport();
+            if (tabId === 'roster') renderRosterTable();
+        }
+
+        // ================= QUICK STAFF DROPDOWN =================
+        function populateQuickStaffDropdown() {
+            const select = document.getElementById('quickStaffSelect');
+            select.innerHTML = '<option value="">-- Choose Employee --</option>';
+
+            const shiftStaff = state.staff.filter(s => s.shift === state.currentShift && s.active);
+            shiftStaff.sort((a,b) => a.name.localeCompare(b.name));
+
+            shiftStaff.forEach(st => {
+                const opt = document.createElement('option');
+                opt.value = st.id;
+                opt.textContent = st.name;
+                select.appendChild(opt);
+            });
+        }
+
+        // ================= START BREAK TIMER =================
+        function handleStartBreak(e) {
+            e.preventDefault();
+            const staffId = document.getElementById('quickStaffSelect').value;
+            const breakType = document.getElementById('quickBreakType').value;
+
+            if (!staffId) {
+                showToast("Please select a staff member", "warning");
+                return;
+            }
+
+            const staffObj = state.staff.find(s => s.id === staffId);
+            if (!staffObj) return;
+
+            // Check if already on break
+            const existing = state.activeBreaks.find(b => b.staffId === staffId);
+            if (existing) {
+                showToast(`${staffObj.name} is ALREADY on active ${existing.breakType} break!`, "danger");
+                return;
+            }
+
+            const newBreak = {
+                id: 'BRK_' + Date.now(),
+                staffId: staffObj.id,
+                staffName: staffObj.name,
+                shift: staffObj.shift,
+                breakType: breakType,
+                startTime: new Date().toISOString(),
+                allottedMins: 20
+            };
+
+            state.activeBreaks.push(newBreak);
+            saveData();
+
+            document.getElementById('quickStaffSelect').value = '';
+            showToast(`Started 20m ${breakType} timer for ${staffObj.name}`, "success");
+
+            renderDashboard();
+        }
+
+        // ================= DASHBOARD RENDER =================
+        function renderDashboard() {
+            const todayStr = new Date().toISOString().slice(0, 10);
+            const shiftStaff = state.staff.filter(s => s.shift === state.currentShift && s.active);
+
+            // Active breaks count
+            const activeInShift = state.activeBreaks.filter(b => b.shift === state.currentShift);
+            document.getElementById('statActiveBreaks').textContent = activeInShift.length;
+            document.getElementById('activeCountBadge').textContent = state.activeBreaks.length;
+
+            // Breaks taken today
+            const logsTodayShift = state.logs.filter(l => l.date === todayStr && l.shift === state.currentShift);
+            document.getElementById('statBreaksToday').textContent = logsTodayShift.length;
+
+            // Overtime today
+            const overtimeCount = logsTodayShift.filter(l => l.varianceMins > 0).length;
+            document.getElementById('statOvertimeToday').textContent = overtimeCount;
+
+            document.getElementById('statShiftStaff').textContent = shiftStaff.length;
+
+            renderActiveTimersGrid();
+            renderShiftBreakMatrix();
+        }
+
+        // ================= ACTIVE TIMERS TICKER & GRID =================
+        function updateTimersUI() {
+            // Live ticker for active timer cards
+            state.activeBreaks.forEach(brk => {
+                const card = document.getElementById(`timer-card-${brk.id}`);
+                if (!card) return;
+
+                const elapsedSeconds = Math.floor((new Date() - new Date(brk.startTime)) / 1000);
+                const allottedSeconds = brk.allottedMins * 60;
+                const remainingSeconds = allottedSeconds - elapsedSeconds;
+
+                const timerClockEl = card.querySelector('.timer-clock');
+                const progressBarEl = card.querySelector('.timer-progress-bar');
+                const badgeEl = card.querySelector('.timer-badge');
+
+                if (remainingSeconds >= 0) {
+                    const mins = Math.floor(remainingSeconds / 60);
+                    const secs = remainingSeconds % 60;
+                    timerClockEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+                    timerClockEl.className = "timer-clock text-3xl font-black font-mono text-slate-800";
+                    
+                    const percent = Math.min(100, Math.max(0, (elapsedSeconds / allottedSeconds) * 100));
+                    progressBarEl.style.width = `${percent}%`;
+                    progressBarEl.className = "timer-progress-bar h-full bg-washmen-500 transition-all duration-1000";
+
+                    badgeEl.textContent = "On Time";
+                    badgeEl.className = "timer-badge px-2.5 py-1 text-[11px] font-extrabold uppercase rounded-full bg-emerald-100 text-emerald-700";
+                    card.classList.remove('pulse-alarm', 'border-rose-300');
+                } else {
+                    const overSecs = Math.abs(remainingSeconds);
+                    const mins = Math.floor(overSecs / 60);
+                    const secs = overSecs % 60;
+                    timerClockEl.textContent = `+${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+                    timerClockEl.className = "timer-clock text-3xl font-black font-mono text-rose-600";
+                    
+                    progressBarEl.style.width = `100%`;
+                    progressBarEl.className = "timer-progress-bar h-full bg-rose-500";
+
+                    badgeEl.textContent = "OVERTIME!";
+                    badgeEl.className = "timer-badge px-2.5 py-1 text-[11px] font-extrabold uppercase rounded-full bg-rose-600 text-white animate-bounce";
+                    card.classList.add('pulse-alarm', 'border-rose-300');
+                }
+            });
+        }
+
+        function renderActiveTimersGrid() {
+            const grid = document.getElementById('activeTimersGrid');
+            const emptyState = document.getElementById('emptyActiveTimers');
+            grid.innerHTML = '';
+
+            document.getElementById('activeTimersCount').textContent = `${state.activeBreaks.length} Active`;
+
+            if (state.activeBreaks.length === 0) {
+                emptyState.classList.remove('hidden');
+                return;
+            } else {
+                emptyState.classList.add('hidden');
+            }
+
+            state.activeBreaks.forEach(brk => {
+                const elapsedSeconds = Math.floor((new Date() - new Date(brk.startTime)) / 1000);
+                const startTimeStr = new Date(brk.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                const card = document.createElement('div');
+                card.id = `timer-card-${brk.id}`;
+                card.className = "bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 transition-all";
+
+                card.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="text-xs font-bold text-washmen-600 uppercase tracking-wider">${brk.shift} Shift</span>
+                            <h4 class="font-bold text-slate-900 text-base leading-tight">${brk.staffName}</h4>
+                        </div>
+                        <span class="timer-badge px-2.5 py-1 text-[11px] font-extrabold uppercase rounded-full bg-emerald-100 text-emerald-700">
+                            On Time
+                        </span>
+                    </div>
+
+                    <div class="bg-slate-50 p-4 rounded-xl border border-slate-100 text-center space-y-1">
+                        <div class="flex items-center justify-center space-x-2 text-xs text-slate-500">
+                            <i class="fa-solid fa-mug-hot"></i>
+                            <span class="font-medium">${brk.breakType} Break</span>
+                            <span>•</span>
+                            <span>Started: ${startTimeStr}</span>
+                        </div>
+                        <div class="timer-clock text-3xl font-black font-mono text-slate-800">
+                            00:00
+                        </div>
+                        <div class="w-full bg-slate-200 h-2 rounded-full overflow-hidden mt-2">
+                            <div class="timer-progress-bar h-full bg-washmen-500 w-0"></div>
+                        </div>
+                    </div>
+
+                    <button onclick="openStopBreakModal('${brk.id}')" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition flex items-center justify-center space-x-2 shadow-sm">
+                        <i class="fa-solid fa-stop text-rose-400"></i>
+                        <span>Stop Break & Log Reason</span>
+                    </button>
+                `;
+
+                grid.appendChild(card);
+            });
+
+            updateTimersUI();
+        }
+
+        // ================= BREAK MATRIX TABLE =================
+        function renderShiftBreakMatrix() {
+            const tbody = document.getElementById('matrixTableBody');
+            tbody.innerHTML = '';
+
+            const todayStr = new Date().toISOString().slice(0, 10);
+            const shiftStaff = state.staff.filter(s => s.shift === state.currentShift && s.active);
+            shiftStaff.sort((a,b) => a.name.localeCompare(b.name));
+
+            shiftStaff.forEach(st => {
+                const staffLogs = state.logs.filter(l => l.staffId === st.id && l.date === todayStr);
+                const activeBreak = state.activeBreaks.find(b => b.staffId === st.id);
+
+                const breakfastLog = staffLogs.find(l => l.breakType === 'Breakfast');
+                const lunchLog = staffLogs.find(l => l.breakType === 'Lunch');
+                const teaLog = staffLogs.find(l => l.breakType === 'Tea');
+
+                const totalMins = staffLogs.reduce((acc, l) => acc + l.durationMins, 0);
+
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50/80 transition";
+
+                tr.innerHTML = `
+                    <td class="px-4 py-3 font-semibold text-slate-900">${st.name}</td>
+                    <td class="px-4 py-3 text-xs text-slate-500">${st.shift}</td>
+                    <td class="px-4 py-3 text-center">${getBreakStatusBadge('Breakfast', breakfastLog, activeBreak)}</td>
+                    <td class="px-4 py-3 text-center">${getBreakStatusBadge('Lunch', lunchLog, activeBreak)}</td>
+                    <td class="px-4 py-3 text-center">${getBreakStatusBadge('Tea', teaLog, activeBreak)}</td>
+                    <td class="px-4 py-3 text-center font-mono text-xs font-bold ${totalMins > 60 ? 'text-rose-600' : 'text-slate-700'}">
+                        ${totalMins} / 60 mins
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                        ${activeBreak 
+                            ? `<button onclick="openStopBreakModal('${activeBreak.id}')" class="px-2.5 py-1 text-xs font-bold bg-rose-500 text-white rounded-lg">Stop</button>` 
+                            : `<button onclick="quickLaunchForStaff('${st.id}')" class="px-2.5 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">Start</button>`
+                        }
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function getBreakStatusBadge(type, log, activeBreak) {
+            if (activeBreak && activeBreak.breakType === type) {
+                return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 animate-pulse"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Active</span>`;
+            }
+            if (log) {
+                return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800"><i class="fa-solid fa-check mr-1"></i> ${log.durationMins}m</span>`;
+            }
+            return `<span class="text-xs text-slate-300 font-bold">—</span>`;
+        }
+
+        function quickLaunchForStaff(staffId) {
+            document.getElementById('quickStaffSelect').value = staffId;
+            window.scrollTo({ top: 180, behavior: 'smooth' });
+        }
+
+        // ================= STOP BREAK & SUPERVISOR EXCEPTION MODAL =================
+        function openStopBreakModal(breakId) {
+            const brk = state.activeBreaks.find(b => b.id === breakId);
+            if (!brk) return;
+
+            activeStopBreakId = breakId;
+
+            const elapsedSeconds = Math.floor((new Date() - new Date(brk.startTime)) / 1000);
+            const mins = Math.floor(elapsedSeconds / 60);
+            const secs = elapsedSeconds % 60;
+            const elapsedStr = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+
+            document.getElementById('stopModalEmployeeName').textContent = `${brk.staffName} (${brk.shift} Shift)`;
+            document.getElementById('stopModalBreakType').textContent = brk.breakType;
+            document.getElementById('stopModalElapsed').textContent = elapsedStr;
+
+            document.getElementById('supervisorReasonSelect').value = 'Normal';
+            document.getElementById('supervisorNotes').value = '';
+            document.getElementById('customMinutesInput').value = Math.max(1, Math.round(elapsedSeconds / 60));
+            handleExceptionReasonChange();
+
+            document.getElementById('stopBreakModal').classList.remove('hidden');
+        }
+
+        function closeStopModal() {
+            document.getElementById('stopBreakModal').classList.add('hidden');
+            activeStopBreakId = null;
+        }
+
+        function handleExceptionReasonChange() {
+            const val = document.getElementById('supervisorReasonSelect').value;
+            const box = document.getElementById('customDurationBox');
+
+            if (val === 'Supervisor Forgot') {
+                box.classList.remove('hidden');
+                document.getElementById('customMinutesInput').value = 20; // reset to 20
+            } else if (val === 'Interrupted Early' || val === 'Manual Override' || val === 'Approved Extended') {
+                box.classList.remove('hidden');
+            } else {
+                box.classList.add('hidden');
+            }
+        }
+
+        function saveCompletedBreak() {
+            if (!activeStopBreakId) return;
+
+            const brk = state.activeBreaks.find(b => b.id === activeStopBreakId);
+            if (!brk) return;
+
+            const reason = document.getElementById('supervisorReasonSelect').value;
+            const notes = document.getElementById('supervisorNotes').value.trim();
+            const now = new Date();
+            
+            const rawElapsedSeconds = Math.floor((now - new Date(brk.startTime)) / 1000);
+            let finalDurationMins = Math.max(1, Math.round(rawElapsedSeconds / 60));
+
+            // Exception logic adjustment
+            if (reason === 'Supervisor Forgot') {
+                finalDurationMins = parseInt(document.getElementById('customMinutesInput').value) || 20;
+            } else if (['Interrupted Early', 'Manual Override', 'Approved Extended'].includes(reason)) {
+                finalDurationMins = parseInt(document.getElementById('customMinutesInput').value) || finalDurationMins;
+            }
+
+            const allotted = brk.allottedMins || 20;
+            const variance = finalDurationMins - allotted;
+
+            const logEntry = {
+                id: 'LOG_' + Date.now(),
+                staffId: brk.staffId,
+                staffName: brk.staffName,
+                shift: brk.shift,
+                breakType: brk.breakType,
+                startTime: brk.startTime,
+                endTime: now.toISOString(),
+                durationMins: finalDurationMins,
+                allottedMins: allotted,
+                varianceMins: variance,
+                exceptionReason: reason,
+                notes: notes,
+                date: now.toISOString().slice(0, 10)
+            };
+
+            // Remove from active & push to logs
+            state.activeBreaks = state.activeBreaks.filter(b => b.id !== activeStopBreakId);
+            state.logs.unshift(logEntry);
+            saveData();
+
+            closeStopModal();
+            renderDashboard();
+            showToast(`Recorded break for ${brk.staffName} (${finalDurationMins}m)`, 'success');
+        }
+
+        // ================= ROSTER MANAGEMENT =================
+        function renderRosterTable() {
+            const tbody = document.getElementById('rosterTableBody');
+            tbody.innerHTML = '';
+
+            const search = document.getElementById('rosterSearch').value.toLowerCase();
+            const filterShift = document.getElementById('rosterShiftFilter').value;
+            const todayStr = new Date().toISOString().slice(0, 10);
+
+            let list = state.staff.filter(s => s.active);
+
+            if (filterShift === 'Current') {
+                list = list.filter(s => s.shift === state.currentShift);
+            } else if (filterShift !== 'All') {
+                list = list.filter(s => s.shift === filterShift);
+            }
+
+            if (search) {
+                list = list.filter(s => s.name.toLowerCase().includes(search));
+            }
+
+            list.sort((a,b) => a.shift.localeCompare(b.shift) || a.name.localeCompare(b.name));
+
+            list.forEach((st, idx) => {
+                const staffLogs = state.logs.filter(l => l.staffId === st.id && l.date === todayStr);
+                const activeBreak = state.activeBreaks.find(b => b.staffId === st.id);
+
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50/80 transition";
+
+                tr.innerHTML = `
+                    <td class="px-5 py-3.5 text-xs text-slate-400 font-mono">${idx + 1}</td>
+                    <td class="px-5 py-3.5 font-bold text-slate-900">${st.name}</td>
+                    <td class="px-5 py-3.5">
+                        <span class="px-2.5 py-1 text-xs font-bold rounded-full ${st.shift === 'Morning' ? 'bg-amber-100 text-amber-800' : 'bg-indigo-100 text-indigo-800'}">
+                            ${st.shift}
+                        </span>
+                    </td>
+                    <td class="px-5 py-3.5 text-xs text-slate-500">${st.department}</td>
+                    <td class="px-5 py-3.5 text-center">
+                        <span class="text-xs font-semibold ${staffLogs.length === 3 ? 'text-emerald-600' : 'text-slate-500'}">
+                            ${staffLogs.length} / 3 Completed
+                        </span>
+                    </td>
+                    <td class="px-5 py-3.5 text-right space-x-2">
+                        <button onclick="openEditStaffModal('${st.id}')" class="text-slate-500 hover:text-washmen-600 text-xs font-semibold px-2 py-1 rounded">
+                            <i class="fa-solid fa-pen"></i> Edit
+                        </button>
+                        <button onclick="removeStaff('${st.id}')" class="text-rose-500 hover:text-rose-700 text-xs font-semibold px-2 py-1 rounded">
+                            <i class="fa-solid fa-trash"></i> Delete
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function openAddStaffModal() {
+            document.getElementById('staffModalTitle').textContent = "Add New Employee";
+            document.getElementById('staffEditId').value = "";
+            document.getElementById('staffInputName').value = "";
+            document.getElementById('staffInputShift').value = state.currentShift;
+            document.getElementById('staffModal').classList.remove('hidden');
+        }
+
+        function openEditStaffModal(id) {
+            const st = state.staff.find(s => s.id === id);
+            if (!st) return;
+
+            document.getElementById('staffModalTitle').textContent = "Edit Employee Details";
+            document.getElementById('staffEditId').value = st.id;
+            document.getElementById('staffInputName').value = st.name;
+            document.getElementById('staffInputShift').value = st.shift;
+            document.getElementById('staffModal').classList.remove('hidden');
+        }
+
+        function closeStaffModal() {
+            document.getElementById('staffModal').classList.add('hidden');
+        }
+
+        function handleSaveStaff(e) {
+            e.preventDefault();
+            const id = document.getElementById('staffEditId').value;
+            const name = document.getElementById('staffInputName').value.trim();
+            const shift = document.getElementById('staffInputShift').value;
+
+            if (!name) return;
+
+            if (id) {
+                const st = state.staff.find(s => s.id === id);
+                if (st) {
+                    st.name = name;
+                    st.shift = shift;
+                }
+                showToast("Staff member updated", "success");
+            } else {
+                state.staff.push({
+                    id: 'STF_' + Date.now(),
+                    name: name,
+                    shift: shift,
+                    department: 'Wash & Fold',
+                    active: true
+                });
+                showToast("New employee added to roster", "success");
+            }
+
+            saveData();
+            closeStaffModal();
+            populateQuickStaffDropdown();
+            renderRosterTable();
+            renderDashboard();
+        }
+
+        function removeStaff(id) {
+            const st = state.staff.find(s => s.id === id);
+            if (!st) return;
+
+            const confirmed = confirm(`Are you sure you want to delete ${st.name} (${st.shift} Shift) from the staff roster?\n\nWARNING: This action CANNOT be undone! The employee will be permanently removed from the department roster.`);
+            if (!confirmed) return;
+
+            st.active = false;
+            state.activeBreaks = state.activeBreaks.filter(b => b.staffId !== id);
+            saveData();
+            showToast(`Deleted ${st.name} from roster`, "info");
+            populateQuickStaffDropdown();
+            renderRosterTable();
+            renderDashboard();
+        }
+
+        // ================= DAILY BREAK LOGS RENDER =================
+        function renderLogsTable() {
+            const tbody = document.getElementById('logsTableBody');
+            const emptyState = document.getElementById('emptyLogs');
+            tbody.innerHTML = '';
+
+            const dateVal = document.getElementById('logDateFilter').value;
+            const shiftVal = document.getElementById('logShiftFilter').value;
+            const typeVal = document.getElementById('logBreakTypeFilter').value;
+            const searchVal = document.getElementById('logSearchInput').value.toLowerCase();
+
+            let filtered = state.logs;
+
+            if (dateVal) filtered = filtered.filter(l => l.date === dateVal);
+            if (shiftVal !== 'All') filtered = filtered.filter(l => l.shift === shiftVal);
+            if (typeVal !== 'All') filtered = filtered.filter(l => l.breakType === typeVal);
+            if (searchVal) filtered = filtered.filter(l => l.staffName.toLowerCase().includes(searchVal));
+
+            if (filtered.length === 0) {
+                emptyState.classList.remove('hidden');
+                return;
+            } else {
+                emptyState.classList.add('hidden');
+            }
+
+            filtered.forEach(log => {
+                const startStr = new Date(log.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const endStr = new Date(log.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-50/80 transition text-xs";
+
+                tr.innerHTML = `
+                    <td class="px-4 py-3 font-mono font-medium text-slate-700">${log.date}</td>
+                    <td class="px-4 py-3 font-semibold text-slate-800">${log.shift}</td>
+                    <td class="px-4 py-3 font-bold text-slate-900">${log.staffName}</td>
+                    <td class="px-4 py-3 font-medium text-slate-700">${log.breakType}</td>
+                    <td class="px-4 py-3 font-mono text-slate-600">${startStr} - ${endStr}</td>
+                    <td class="px-4 py-3 text-center font-bold font-mono text-slate-900">${log.durationMins} mins</td>
+                    <td class="px-4 py-3 text-center">${getVarianceBadge(log.varianceMins)}</td>
+                    <td class="px-4 py-3">${getReasonBadge(log.exceptionReason, log.notes)}</td>
+                    <td class="px-4 py-3 text-right">
+                        <button onclick="deleteLog('${log.id}')" class="text-slate-400 hover:text-rose-600 p-1" title="Delete log">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function getVarianceBadge(v) {
+            if (v > 0) {
+                return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">+${v} min over</span>`;
+            } else if (v < 0) {
+                return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800">${v} min early</span>`;
+            }
+            return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-700">On Time (0)</span>`;
+        }
+
+        function getReasonBadge(reason, notes) {
+            let color = 'bg-slate-100 text-slate-700';
+            if (reason.includes('Forgot')) color = 'bg-amber-100 text-amber-800';
+            if (reason.includes('Late')) color = 'bg-rose-100 text-rose-800';
+            if (reason.includes('Approved')) color = 'bg-blue-100 text-blue-800';
+
+            return `
+                <div>
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${color}">${reason}</span>
+                    ${notes ? `<p class="text-[10px] text-slate-400 italic mt-0.5">${notes}</p>` : ''}
+                </div>
+            `;
+        }
+
+        function deleteLog(logId) {
+            state.logs = state.logs.filter(l => l.id !== logId);
+            saveData();
+            renderLogsTable();
+            renderDashboard();
+            showToast("Log entry deleted", "info");
+        }
+
+        // ================= MONTHLY VARIANCE REPORT =================
+        function renderMonthlyReport() {
+            const tbody = document.getElementById('monthlyReportTableBody');
+            tbody.innerHTML = '';
+
+            const selectedMonth = document.getElementById('reportMonthPicker').value; // 'YYYY-MM'
+            const selectedShift = document.getElementById('reportShiftFilter').value;
+
+            let logsInMonth = state.logs.filter(l => l.date.startsWith(selectedMonth));
+            if (selectedShift !== 'All') {
+                logsInMonth = logsInMonth.filter(l => l.shift === selectedShift);
+            }
+
+            let staffList = state.staff.filter(s => s.active);
+            if (selectedShift !== 'All') {
+                staffList = staffList.filter(s => s.shift === selectedShift);
+            }
+
+            const ALLOTTED_MINS = 26 * 60; // 1560 mins (26:00 Hours per employee)
+            const CRITICAL_30H_MINS = 30 * 60; // 1800 mins (30:00 Hours cap)
+
+            let totalBreaks = logsInMonth.length;
+            let totalAllotted = staffList.length * 26; // in hours
+            let totalUsedMins = logsInMonth.reduce((acc, l) => acc + l.durationMins, 0);
+            let totalAllottedMins = staffList.length * ALLOTTED_MINS;
+            let netVarianceMins = totalUsedMins - totalAllottedMins;
+
+            document.getElementById('repTotalBreaks').textContent = totalBreaks;
+            document.getElementById('repTotalAllotted').textContent = `${totalAllotted} hrs (26h/staff)`;
+            
+            const netVarEl = document.getElementById('repNetVariance');
+            const netHours = Math.floor(Math.abs(netVarianceMins) / 60);
+            const netMinutes = Math.abs(netVarianceMins) % 60;
+            const netFormatted = `${netHours}h ${String(netMinutes).padStart(2, '0')}m`;
+
+            if (netVarianceMins > 0) {
+                netVarEl.textContent = `+${netFormatted} Over`;
+                netVarEl.className = "text-lg font-black text-rose-600";
+            } else if (netVarianceMins < 0) {
+                netVarEl.textContent = `-${netFormatted} Under`;
+                netVarEl.className = "text-lg font-black text-emerald-600";
+            } else {
+                netVarEl.textContent = `0h 00m (Target)`;
+                netVarEl.className = "text-lg font-black text-slate-700";
+            }
+
+            staffList.sort((a,b) => a.name.localeCompare(b.name));
+
+            staffList.forEach(st => {
+                const userLogs = logsInMonth.filter(l => l.staffId === st.id);
+                const userBreaksCount = userLogs.length;
+                const userUsedMins = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
+                const varianceMins = userUsedMins - ALLOTTED_MINS; // vs 26:00 Hours
+
+                const isOver26 = userUsedMins > ALLOTTED_MINS;
+                const isUnder26 = userUsedMins < ALLOTTED_MINS;
+                const isExact26 = userUsedMins === ALLOTTED_MINS;
+                const isOver30 = userUsedMins > CRITICAL_30H_MINS; // > 30 Hours
+
+                // Format Consumed time as exact hours and minutes
+                const consumedHours = Math.floor(userUsedMins / 60);
+                const consumedMins = userUsedMins % 60;
+                const consumedFormatted = `${consumedHours}h ${String(consumedMins).padStart(2, '0')}m`;
+                const consumedDigital = `${String(consumedHours).padStart(2, '0')}:${String(consumedMins).padStart(2, '0')} Hrs`;
+
+                // Format Net Hours vs 26:00 Hours
+                const netDiffAbs = Math.abs(varianceMins);
+                const netDiffHours = Math.floor(netDiffAbs / 60);
+                const netDiffMins = netDiffAbs % 60;
+                const netDiffFormatted = `${netDiffHours}h ${String(netDiffMins).padStart(2, '0')}m`;
+
+                // Net Hours Cell: Red if > 26h, Green if < 26h, Neutral if == 26h
+                let netHoursCell = '';
+                if (isOver26) {
+                    netHoursCell = `<span class="text-rose-600 font-black font-mono text-sm">+${netDiffFormatted} Over</span><span class="block text-[10px] text-rose-500 font-semibold">(+${varianceMins}m over 26h)</span>`;
+                } else if (isUnder26) {
+                    netHoursCell = `<span class="text-emerald-600 font-black font-mono text-sm">-${netDiffFormatted} Under</span><span class="block text-[10px] text-emerald-500 font-semibold">(${netDiffFormatted} remaining)</span>`;
+                } else {
+                    netHoursCell = `<span class="text-slate-600 font-bold font-mono text-sm">00:00 Hrs</span><span class="block text-[10px] text-slate-400 font-semibold">(Exact 26h Target)</span>`;
+                }
+
+                // Adherence & Warning Cell
+                let warningBadge = '';
+                if (isOver30) {
+                    const over30Mins = userUsedMins - CRITICAL_30H_MINS;
+                    const over30H = Math.floor(over30Mins / 60);
+                    const over30M = over30Mins % 60;
+                    warningBadge = `
+                        <div class="flex flex-col items-center gap-1">
+                            <span class="px-3 py-1 text-[11px] font-black uppercase rounded-full bg-rose-600 text-white animate-pulse shadow-md flex items-center gap-1.5">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                CRITICAL: EXCEEDED 30 HOURS!
+                            </span>
+                            <span class="text-[10px] text-rose-600 font-bold font-mono">
+                                +${over30H}h ${String(over30M).padStart(2, '0')}m over 30h limit
+                            </span>
+                        </div>
+                    `;
+                } else if (isOver26) {
+                    warningBadge = `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-amber-100 text-amber-800">Overtime (+${netDiffFormatted})</span>`;
+                } else if (isUnder26) {
+                    warningBadge = `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800">Within Allotment (Compliant)</span>`;
+                } else {
+                    warningBadge = `<span class="px-2.5 py-1 text-xs font-bold rounded-full bg-cyan-100 text-cyan-800">Exact 26h Target</span>`;
+                }
+
+                const tr = document.createElement('tr');
+                tr.className = `hover:bg-slate-50/80 transition text-sm ${isOver30 ? 'bg-rose-50/70 border-l-4 border-l-rose-500' : isOver26 ? 'border-l-4 border-l-amber-400' : ''}`;
+
+                tr.innerHTML = `
+                    <td class="px-4 py-3.5">
+                        <span class="font-bold text-slate-900 block">${st.name}</span>
+                        <span class="text-[10px] text-slate-400">${userBreaksCount} breaks logged</span>
+                    </td>
+                    <td class="px-4 py-3.5 text-xs text-slate-500">${st.shift}</td>
+                    <td class="px-4 py-3.5 text-center">
+                        <span class="font-mono font-bold text-slate-800 text-xs px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 inline-block">26:00 Hours</span>
+                        <span class="block text-[10px] text-slate-400 font-medium">(26h 00m)</span>
+                    </td>
+                    <td class="px-4 py-3.5 text-center">
+                        <span class="font-mono font-black text-slate-900 text-sm block">${consumedFormatted}</span>
+                        <span class="text-[10px] font-mono text-slate-500">${consumedDigital} (${userUsedMins} mins)</span>
+                    </td>
+                    <td class="px-4 py-3.5 text-center font-mono">
+                        ${netHoursCell}
+                    </td>
+                    <td class="px-4 py-3.5 text-center">${warningBadge}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ================= CSV EXPORTS FOR GOOGLE SHEETS =================
+        function exportLogsToCSV() {
+            if (state.logs.length === 0) {
+                showToast("No log records available to export", "warning");
+                return;
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "Log ID,Date,Shift,Employee Name,Break Type,Start Time,End Time,Actual Duration (Mins),Allotted Duration (Mins),Variance (Mins),Supervisor Exception,Notes\n";
+
+            state.logs.forEach(l => {
+                const row = [
+                    l.id,
+                    l.date,
+                    l.shift,
+                    `"${l.staffName}"`,
+                    l.breakType,
+                    l.startTime,
+                    l.endTime,
+                    l.durationMins,
+                    l.allottedMins,
+                    l.varianceMins,
+                    `"${l.exceptionReason}"`,
+                    `"${l.notes || ''}"`
+                ];
+                csvContent += row.join(",") + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `Washmen_Break_Logs_${new Date().toISOString().slice(0,10)}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showToast("Exported Daily Break Logs CSV for Google Sheets", "success");
+        }
+
+        function exportMonthlyReportToCSV() {
+            const selectedMonth = document.getElementById('reportMonthPicker').value;
+            const logsInMonth = state.logs.filter(l => l.date.startsWith(selectedMonth));
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "Month,Employee ID,Employee Name,Shift,Department,Breaks Taken,Monthly Allotment,Total Consumed (Hours & Mins),Total Consumed (Mins),Net Hours (vs 26h),Status,Critical Warning (>30h)\n";
+
+            state.staff.filter(s => s.active).forEach(st => {
+                const userLogs = logsInMonth.filter(l => l.staffId === st.id);
+                const count = userLogs.length;
+                const consumedMins = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
+                const varianceMins = consumedMins - (26 * 60);
+                const isOver30h = consumedMins > (30 * 60);
+                const isOver26h = consumedMins > (26 * 60);
+                const statusStr = isOver30h ? 'CRITICAL EXCEEDED (>30h)' : isOver26h ? 'Overtime (>26h)' : consumedMins === (26 * 60) ? 'Exact 26h' : 'Compliant (<26h)';
+                const warningStr = isOver30h ? `YES (+${Math.floor((consumedMins - 1800) / 60)}h ${(consumedMins - 1800) % 60}m over 30h)` : 'NO';
+                const consumedFormatted = `${Math.floor(consumedMins / 60)}h ${consumedMins % 60}m`;
+                const netFormatted = varianceMins > 0 ? `+${Math.floor(varianceMins / 60)}h ${varianceMins % 60}m` : varianceMins < 0 ? `-${Math.floor(Math.abs(varianceMins) / 60)}h ${Math.abs(varianceMins) % 60}m` : '0h 00m';
+
+                const row = [
+                    selectedMonth,
+                    st.id,
+                    `"${st.name}"`,
+                    st.shift,
+                    st.department,
+                    count,
+                    `"26:00 Hours"`,
+                    `"${consumedFormatted}"`,
+                    consumedMins,
+                    `"${netFormatted}"`,
+                    `"${statusStr}"`,
+                    `"${warningStr}"`
+                ];
+                csvContent += row.join(",") + "\n";
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", `Washmen_Monthly_Break_Summary_${selectedMonth}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+
+            showToast("Exported Monthly Summary CSV", "success");
+        }
+
+        // ================= JSON BACKUP & RESTORE =================
+        function exportDatabaseJSON() {
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state, null, 2));
+            const dlAnchor = document.createElement('a');
+            dlAnchor.setAttribute("href", dataStr);
+            dlAnchor.setAttribute("download", `Washmen_Break_Database_${new Date().toISOString().slice(0,10)}.json`);
+            document.body.appendChild(dlAnchor);
+            dlAnchor.click();
+            dlAnchor.remove();
+            showToast("Exported JSON Database Backup", "success");
+        }
+
+        function importDatabaseJSON(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const imported = JSON.parse(e.target.result);
+                    if (imported && imported.staff) {
+                        state = imported;
+                        saveData();
+                        location.reload();
+                    } else {
+                        showToast("Invalid JSON structure", "danger");
+                    }
+                } catch(err) {
+                    showToast("Error parsing JSON file", "danger");
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function confirmResetData() {
+            if (confirm("Are you sure you want to reset staff roster and logs to initial defaults?")) {
+                initDefaultData();
+                location.reload();
+            }
+        }
+
+        // ================= TOAST NOTIFICATION SYSTEM =================
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            
+            const toast = document.createElement('div');
+            toast.className = "pointer-events-auto px-4 py-3 rounded-xl shadow-xl text-xs font-bold text-white flex items-center space-x-2 animate-in slide-in-from-bottom-5 duration-200 transition-all";
+
+            if (type === 'success') toast.classList.add('bg-emerald-600');
+            else if (type === 'danger') toast.classList.add('bg-rose-600');
+            else if (type === 'warning') toast.classList.add('bg-amber-600');
+            else toast.classList.add('bg-slate-900');
+
+            toast.innerHTML = `
+                <i class="fa-solid ${type === 'success' ? 'fa-circle-check' : 'fa-circle-info'}"></i>
+                <span>${message}</span>
+            `;
+
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
