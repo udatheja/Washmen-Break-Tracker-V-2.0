@@ -176,6 +176,10 @@ export interface BreakLog {
   deviceTimestamp?: string;
   activeBreakId?: string;
   testMode?: boolean;
+  deleted?: boolean;
+  deletedAt?: string;
+  deletedDate?: string;
+  deletedBy?: string;
 }
 
 const STORAGE_KEY = MAIN_STORAGE_KEY;
@@ -249,6 +253,7 @@ export default function App() {
   // 1 Manager & 4 Supervisors Login Accounts + Active Session State
   const [authAccounts, setAuthAccounts] = useState<AuthAccount[]>(() => getStoredAuthAccounts());
   const [loggedInAccount, setLoggedInAccount] = useState<AuthAccount | null>(null);
+  const [logDeleteWarning, setLogDeleteWarning] = useState<string>('');
 
   const handleUpdateAuthAccounts = useCallback(
     (nextAccounts: AuthAccount[]) => {
@@ -715,7 +720,7 @@ export default function App() {
 
   // Statistics (Using Asia/Dubai date & shift-cycle refresh so Night Shift breaks refresh when Night Shift starts in the evening)
   const todayStr = useMemo(() => getDubaiTimeInfo(currentTime, kioskSettings).dateStr, [currentTime, kioskSettings]);
-  const validLogs = useMemo(() => logs.filter((l) => !l.voided && !l.testMode), [logs]);
+  const validLogs = useMemo(() => logs.filter((l) => !l.voided && !l.deleted && !l.testMode), [logs]);
   const activeBreaksInShift = activeBreaks.filter((b) => b.shift === currentShift);
   const todayLogsInShift = useMemo(
     () =>
@@ -1270,10 +1275,10 @@ export default function App() {
       showToast('No logs recorded yet to export', 'warning');
       return;
     }
-    let csv = 'Log ID,Employee ID,Date,Shift,Employee Name,Break Type,Start Time,End Time,Actual Duration (Mins),Allotted (Mins),Variance (Mins),Supervisor Exception,Notes,Source,Voided,Needs Review,Test Mode\n';
+    let csv = 'Log ID,Employee ID,Date,Shift,Employee Name,Break Type,Start Time,End Time,Actual Duration (Mins),Allotted (Mins),Variance (Mins),Supervisor Exception,Notes,Source,Voided,Needs Review,Test Mode,Deleted,Deleted At,Deleted By\n';
     logs.forEach((l) => {
       const allotted = resolveAllottedMins(l);
-      csv += `${l.id},${l.empId || ''},${l.date},${l.shift},"${l.staffName}",${l.breakType},${new Date(l.startTime).toLocaleTimeString()},${new Date(l.endTime).toLocaleTimeString()},${l.durationMins},${allotted},${l.varianceMins},"${l.exceptionReason}","${l.notes || ''}",${l.source || 'supervisor'},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)}\n`;
+      csv += `${l.id},${l.empId || ''},${l.date},${l.shift},"${l.staffName}",${l.breakType},${new Date(l.startTime).toLocaleTimeString()},${new Date(l.endTime).toLocaleTimeString()},${l.durationMins},${allotted},${l.varianceMins},"${l.exceptionReason}","${l.notes || ''}",${l.source || 'supervisor'},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)},${Boolean(l.deleted)},"${l.deletedAt ? `${l.deletedAt} (${l.deletedDate || l.date})` : ''}","${l.deletedBy || ''}"\n`;
     });
     await downloadOrShareFile(`Washmen_Break_Logs_${todayStr}.csv`, csv, 'text/csv;charset=utf-8;', false);
     showToast('Exported Daily Break Logs CSV', 'success');
@@ -2591,6 +2596,24 @@ export default function App() {
               </div>
             </div>
 
+            {/* Warning Banner if Supervisor Login tries to delete a Daily Break Log */}
+            {logDeleteWarning && (
+              <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-3.5 flex items-center justify-between gap-3 text-amber-900 text-xs font-bold shadow-xs">
+                <div className="flex items-center space-x-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>{logDeleteWarning}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLogDeleteWarning('')}
+                  className="text-amber-700 hover:text-amber-950 p-1 cursor-pointer shrink-0"
+                  title="Dismiss warning"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             {/* Table */}
             <div className="bg-white rounded-2xl border border-[#E4E7F2] overflow-hidden shadow-sm">
               <div className="overflow-x-auto">
@@ -2617,7 +2640,13 @@ export default function App() {
                         <tr
                           key={log.id}
                           className={`hover:bg-[#F9FAFE] transition ${
-                            log.voided ? 'opacity-60 bg-slate-50' : log.needsReview ? 'bg-rose-50/40' : ''
+                            log.deleted
+                              ? 'opacity-75 bg-rose-50/40'
+                              : log.voided
+                              ? 'opacity-60 bg-slate-50'
+                              : log.needsReview
+                              ? 'bg-rose-50/40'
+                              : ''
                           }`}
                         >
                           <td className="px-3.5 py-3 font-mono font-bold text-[#4D3FDC]">
@@ -2641,7 +2670,7 @@ export default function App() {
                           <td className="px-3.5 py-3 text-[#4D3FDC] font-semibold">{log.breakType}</td>
                           <td className="px-3.5 py-3 font-mono text-[#5C5A85]">{startStr} - {endStr}</td>
                           <td className="px-3.5 py-3 text-center font-mono font-bold text-[#171262]">
-                            {log.voided ? (
+                            {log.voided || log.deleted ? (
                               <span className="line-through text-slate-400">{log.durationMins} mins</span>
                             ) : (
                               <span>
@@ -2651,7 +2680,11 @@ export default function App() {
                             )}
                           </td>
                           <td className="px-3.5 py-3 text-center">
-                            {log.voided ? (
+                            {log.deleted ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-300 uppercase">
+                                DELETED
+                              </span>
+                            ) : log.voided ? (
                               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-slate-200 text-slate-700 uppercase">
                                 VOIDED
                               </span>
@@ -2675,7 +2708,7 @@ export default function App() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex flex-wrap items-center gap-1.5">
-                              {log.needsReview && !log.voided && (
+                              {log.needsReview && !log.voided && !log.deleted && (
                                 <span className="px-2 py-0.5 rounded text-[10px] font-black bg-rose-600 text-white uppercase">
                                   NEEDS REVIEW
                                 </span>
@@ -2685,22 +2718,62 @@ export default function App() {
                             {log.notes && <p className="text-[10px] text-[#5C5A85] italic mt-0.5">{log.notes}</p>}
                           </td>
                           <td className="px-3 py-3 text-right">
-                            <button
-                              onClick={() => {
-                                const nextDeletedLogs = deletedLogs.includes(log.id)
-                                  ? deletedLogs
-                                  : [...deletedLogs, log.id];
-                                const nextLogs = logs.filter((l) => l.id !== log.id);
-                                setDeletedLogs(nextDeletedLogs);
-                                setLogs(nextLogs);
-                                serverSync({ logs: nextLogs, deletedLogs: nextDeletedLogs });
-                                showToast('Log deleted permanently', 'info');
-                              }}
-                              className="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
-                              title="Delete Log"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+                            {log.deleted ? (
+                              <div className="inline-flex flex-col items-end text-right bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1 text-[10px] leading-tight">
+                                <span className="font-black text-rose-700">
+                                  Deleted at {log.deletedAt}
+                                </span>
+                                <span className="font-semibold text-rose-600">
+                                  by <strong className="font-mono text-[#171262]">{log.deletedBy || 'manager'}</strong> ({log.deletedDate || log.date})
+                                </span>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  if (loggedInAccount?.role !== 'Manager') {
+                                    const warnMsg =
+                                      'Warning: Supervisor login cannot delete daily break logs. Only Manager login has access to delete logs.';
+                                    setLogDeleteWarning(warnMsg);
+                                    showToast(warnMsg, 'warning');
+                                    return;
+                                  }
+                                  setLogDeleteWarning('');
+                                  const deletedTimeStr = new Date().toLocaleTimeString([], {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                    hour12: true,
+                                  });
+                                  const deletedByUser = loggedInAccount.username || 'manager';
+                                  const nextLogs = logs.map((l) =>
+                                    l.id === log.id
+                                      ? {
+                                          ...l,
+                                          deleted: true,
+                                          deletedAt: deletedTimeStr,
+                                          deletedDate: todayStr,
+                                          deletedBy: deletedByUser,
+                                        }
+                                      : l
+                                  );
+                                  setLogs(nextLogs);
+                                  serverSync({ logs: nextLogs });
+                                  showToast(`Log deleted at ${deletedTimeStr} by ${deletedByUser}`, 'info');
+                                }}
+                                className={`p-1 cursor-pointer transition ${
+                                  loggedInAccount?.role === 'Manager'
+                                    ? 'text-slate-400 hover:text-rose-600'
+                                    : 'text-slate-300 hover:text-amber-600'
+                                }`}
+                                title={
+                                  loggedInAccount?.role === 'Manager'
+                                    ? 'Delete Log (Manager Only)'
+                                    : 'Supervisor login cannot delete logs (Manager Only)'
+                                }
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );

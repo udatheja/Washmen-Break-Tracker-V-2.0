@@ -502,8 +502,23 @@ export function AccountPasswordManagerCard({
   const [showNewPassword, setShowNewPassword] = useState<boolean>(false);
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
   const [confirmResetAllOpen, setConfirmResetAllOpen] = useState<boolean>(false);
+  const [accessWarningMessage, setAccessWarningMessage] = useState<string>('');
+
+  const isCurrentUserManager = currentUser?.role === 'Manager';
+
+  const triggerSupervisorAccessWarning = (msg: string) => {
+    setAccessWarningMessage(msg);
+    showToast(msg, 'warning');
+  };
 
   const startEditingAccount = (acc: AuthAccount) => {
+    if (acc.role === 'Manager' && !isCurrentUserManager) {
+      triggerSupervisorAccessWarning(
+        'Warning: Supervisor login cannot view or change the Manager password. Only Manager login has access.'
+      );
+      return;
+    }
+    setAccessWarningMessage('');
     setEditingAccountId(acc.id);
     setEditUsernameInput(acc.username);
     setNewPasswordInput(acc.password);
@@ -512,6 +527,12 @@ export function AccountPasswordManagerCard({
 
   const handleSaveAccountChanges = (e: React.FormEvent, acc: AuthAccount) => {
     e.preventDefault();
+    if (acc.role === 'Manager' && !isCurrentUserManager) {
+      triggerSupervisorAccessWarning(
+        'Warning: Supervisor login cannot change the Manager password. Only Manager login has access.'
+      );
+      return;
+    }
     const cleanPass = newPasswordInput.trim();
     const cleanUser = editUsernameInput.trim() || acc.username;
 
@@ -533,10 +554,18 @@ export function AccountPasswordManagerCard({
 
     onUpdateAccounts(updated);
     setEditingAccountId(null);
+    setAccessWarningMessage('');
     showToast(`Updated login password for ${acc.role} Login`, 'success');
   };
 
   const handleResetSingleDefault = (acc: AuthAccount) => {
+    if (acc.role === 'Manager' && !isCurrentUserManager) {
+      triggerSupervisorAccessWarning(
+        'Warning: Supervisor login cannot use "Default PW" in the Manager section. You can only use your own Supervisor "Default PW" card.'
+      );
+      return;
+    }
+    setAccessWarningMessage('');
     const def = DEFAULT_AUTH_ACCOUNTS.find((d) => d.id === acc.id);
     if (!def) return;
     const updated = accounts.map((item) =>
@@ -558,6 +587,14 @@ export function AccountPasswordManagerCard({
   };
 
   const handleResetAllDefaults = () => {
+    if (!isCurrentUserManager) {
+      triggerSupervisorAccessWarning(
+        'Warning: Supervisor login does not have access to use "Reset Both Passwords to Default". Only Manager login can reset both passwords.'
+      );
+      setConfirmResetAllOpen(false);
+      return;
+    }
+    setAccessWarningMessage('');
     const resetList = DEFAULT_AUTH_ACCOUNTS.map((d) => ({
       ...d,
       updatedAt: Date.now(),
@@ -577,23 +614,50 @@ export function AccountPasswordManagerCard({
             <span>Manager &amp; Supervisor Login Password Reset</span>
           </h3>
           <p className="text-xs text-[#5C5A85] mt-0.5">
-            Reset or change the password for the Manager Login (1 Manager) and Supervisor Login (shared by all 4 Supervisors).
+            {isCurrentUserManager
+              ? 'Manager Login has full access to view Supervisor password and reset both Manager and Supervisor passwords.'
+              : 'Supervisor Login can only change or reset the Supervisor password. Manager password and "Reset Both Passwords to Default" are restricted to Manager Login.'}
           </p>
         </div>
 
         {currentUser && (
-          <span className="px-3 py-1 rounded-full bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] text-xs font-extrabold">
-            Signed in as: {currentUser.role}
+          <span
+            className={`px-3 py-1 rounded-full text-xs font-extrabold border ${
+              isCurrentUserManager
+                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                : 'bg-[#EEECFB] text-[#4D3FDC] border-[#D5D0F9]'
+            }`}
+          >
+            Signed in as: {currentUser.role} ({currentUser.username})
           </span>
         )}
       </div>
 
+      {/* Warning Banner when Supervisor attempts a restricted Manager action */}
+      {accessWarningMessage && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-3 flex items-start justify-between gap-2.5 text-amber-900 text-xs font-bold shadow-2xs">
+          <div className="flex items-start space-x-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <span>{accessWarningMessage}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAccessWarningMessage('')}
+            className="text-amber-700 hover:text-amber-950 p-0.5 cursor-pointer shrink-0"
+            title="Dismiss warning"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* 2 Role Accounts Cards */}
       <div className="space-y-3 pt-1">
         {accounts.map((acc) => {
-          const isEditing = editingAccountId === acc.id;
           const isManager = acc.role === 'Manager';
-          const isShowingPw = Boolean(visiblePasswords[acc.id]);
+          const isRestrictedForSupervisor = isManager && !isCurrentUserManager;
+          const isEditing = !isRestrictedForSupervisor && editingAccountId === acc.id;
+          const isShowingPw = !isRestrictedForSupervisor && Boolean(visiblePasswords[acc.id]);
 
           return (
             <div
@@ -601,6 +665,8 @@ export function AccountPasswordManagerCard({
               className={`p-4 rounded-2xl border transition ${
                 isEditing
                   ? 'bg-[#F8F9FE] border-2 border-[#4D3FDC] shadow-sm'
+                  : isRestrictedForSupervisor
+                  ? 'bg-slate-50/90 border-slate-200'
                   : 'bg-[#FAFBFD] border-[#E4E7F2]'
               }`}
             >
@@ -629,6 +695,12 @@ export function AccountPasswordManagerCard({
                       >
                         {isManager ? '1 Manager' : 'All 4 Supervisors'}
                       </span>
+                      {isRestrictedForSupervisor && (
+                        <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded-md bg-rose-100 text-rose-800 border border-rose-200 inline-flex items-center gap-1">
+                          <Lock className="w-2.5 h-2.5" />
+                          <span>Manager Access Only</span>
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5C5A85] mt-0.5">
                       <span>
@@ -642,14 +714,27 @@ export function AccountPasswordManagerCard({
                         </strong>
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
+                            if (isRestrictedForSupervisor) {
+                              triggerSupervisorAccessWarning(
+                                'Warning: Supervisor login cannot see the Manager password. Only Manager login can view it.'
+                              );
+                              return;
+                            }
+                            setAccessWarningMessage('');
                             setVisiblePasswords((prev) => ({
                               ...prev,
                               [acc.id]: !prev[acc.id],
-                            }))
-                          }
+                            }));
+                          }}
                           className="text-[#5C5A85] hover:text-[#171262] p-0.5 cursor-pointer"
-                          title={isShowingPw ? 'Hide password' : 'Show password'}
+                          title={
+                            isRestrictedForSupervisor
+                              ? 'Manager password is hidden for Supervisor login'
+                              : isShowingPw
+                              ? 'Hide password'
+                              : 'Show password'
+                          }
                         >
                           {isShowingPw ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         </button>
@@ -661,8 +746,24 @@ export function AccountPasswordManagerCard({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => (isEditing ? setEditingAccountId(null) : startEditingAccount(acc))}
-                    className="px-3 py-1.5 rounded-xl bg-[#4D3FDC] hover:bg-[#3B2EC9] text-white font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer shadow-2xs"
+                    onClick={() => {
+                      if (isRestrictedForSupervisor) {
+                        triggerSupervisorAccessWarning(
+                          'Warning: Supervisor login cannot change or reset the Manager password. Only Manager login has access.'
+                        );
+                        return;
+                      }
+                      if (isEditing) {
+                        setEditingAccountId(null);
+                      } else {
+                        startEditingAccount(acc);
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-xl font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer shadow-2xs ${
+                      isRestrictedForSupervisor
+                        ? 'bg-slate-200 hover:bg-slate-300 text-slate-600'
+                        : 'bg-[#4D3FDC] hover:bg-[#3B2EC9] text-white'
+                    }`}
                   >
                     <Edit2 className="w-3.5 h-3.5" />
                     <span>{isEditing ? 'Close' : 'Reset / Change Password'}</span>
@@ -670,8 +771,16 @@ export function AccountPasswordManagerCard({
                   <button
                     type="button"
                     onClick={() => handleResetSingleDefault(acc)}
-                    className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-[#5C5A85] hover:text-[#171262] border border-[#E4E7F2] font-semibold text-xs transition cursor-pointer"
-                    title={`Reset ${acc.role} password back to default (${acc.defaultPassword})`}
+                    className={`px-2.5 py-1.5 rounded-xl border font-semibold text-xs transition cursor-pointer ${
+                      isRestrictedForSupervisor
+                        ? 'bg-slate-100 hover:bg-slate-200 text-slate-500 border-slate-300'
+                        : 'bg-white hover:bg-slate-100 text-[#5C5A85] hover:text-[#171262] border-[#E4E7F2]'
+                    }`}
+                    title={
+                      isRestrictedForSupervisor
+                        ? 'Restricted: Supervisor login cannot use Default PW in Manager section'
+                        : `Reset ${acc.role} password back to default (${acc.defaultPassword})`
+                    }
                   >
                     Default PW
                   </button>
@@ -747,8 +856,21 @@ export function AccountPasswordManagerCard({
         {!confirmResetAllOpen ? (
           <button
             type="button"
-            onClick={() => setConfirmResetAllOpen(true)}
-            className="px-3.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer"
+            onClick={() => {
+              if (!isCurrentUserManager) {
+                triggerSupervisorAccessWarning(
+                  'Warning: Supervisor login does not have access to use "Reset Both Passwords to Default". Please use your own Supervisor "Default PW" card only.'
+                );
+                return;
+              }
+              setAccessWarningMessage('');
+              setConfirmResetAllOpen(true);
+            }}
+            className={`px-3.5 py-2 rounded-xl border font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer ${
+              isCurrentUserManager
+                ? 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-500 border-slate-300'
+            }`}
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Reset Both Passwords to Default</span>

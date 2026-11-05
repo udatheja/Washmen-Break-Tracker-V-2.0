@@ -189,6 +189,10 @@ export interface SyncableBreakLog {
   deviceTimestamp?: string;
   activeBreakId?: string;
   testMode?: boolean;
+  deleted?: boolean;
+  deletedAt?: string;
+  deletedDate?: string;
+  deletedBy?: string;
 }
 
 export interface AppSyncState {
@@ -300,7 +304,7 @@ export function calculateMonthlyEntitledMins(
   let sumSavedAllottedForTaken = 0;
 
   employeeValidMonthLogs.forEach((l) => {
-    if (l.voided || l.testMode) return;
+    if (l.voided || l.deleted || l.testMode) return;
     const slot = resolveBreakSlot(l.breakType, l.breakSlot, settings);
     const fallbackSlotMins = slot ? slots[slot - 1].mins : slots[0].mins;
     const savedAllotted = Number(l.allottedMins) > 0 ? Number(l.allottedMins) : fallbackSlotMins;
@@ -710,11 +714,11 @@ export function getNightShiftCycleDateStr(dateObj: Date, settings?: KioskSetting
  * for its shift (Morning or Night), refreshing & refilling breaks 30 minutes before each shift starts.
  */
 export function isLogInCurrentShiftCycle(
-  log: { shift: 'Morning' | 'Night'; date?: string; startTime?: string; endTime?: string; voided?: boolean },
+  log: { shift: 'Morning' | 'Night'; date?: string; startTime?: string; endTime?: string; voided?: boolean; deleted?: boolean },
   now: Date = new Date(),
   settings?: KioskSettings
 ): boolean {
-  if (log.voided) return false;
+  if (log.voided || log.deleted) return false;
 
   // Check manual shift refill timestamp if supervisor triggered a manual refill
   const refillTs = Number(settings?.shiftRefillTimestamps?.[log.shift] || 0);
