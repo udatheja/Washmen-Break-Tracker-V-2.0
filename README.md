@@ -239,8 +239,33 @@ Do not redistribute or deploy it as an official company product without the nece
 
 <p align="center">Built with Purpose. Designed for Operations. Powered by Innovation.
 
-Created by Udara Fernando
+<div align="center">
 
-"UF-WASHMEN-WF-2026"
+  <p>
+    ✨ Crafted with passion by
+    <strong>
+      <span style="color: #2ECC71;">Udara Fernando</span>
+    </strong>
+  </p>
+
+  <h3>
+    <strong>
+      <span style="color: #FFD700;">
+        "Jack Of All Trades ✅ Master of Nothing 🤫"
+      </span>
+    </strong>
+  </h3>
+
+  <sub>💡 Think Different • Build Smart • Keep Creating</sub>
+
+</div>
+
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+
+  <h1>Built with Gemini and Using Claude Code</h2>
+
+  <p>The fastest path from prompt to production is Do real world projects.</p>
+
+</div>
 
 </p>
