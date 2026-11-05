@@ -781,6 +781,7 @@ const PIN_STORAGE_KEY = 'washmen_kiosk_supervisor_pin_v1';
 export const MAIN_STORAGE_KEY = 'washmen_break_tracker_v5';
 export const KIOSK_LOCK_STORAGE_KEY = 'washmen_kiosk_locked_v1';
 export const KIOSK_SETTINGS_STORAGE_KEY = 'washmen_kiosk_settings_v2';
+export const AUTH_ACCOUNTS_STORAGE_KEY = 'washmen_auth_accounts_v1';
 const IDB_DB_NAME = 'WashmenAndroidLocalDB';
 const IDB_STORE_NAME = 'kv_store';
 const memoryStorageFallback = new Map<string, string>();
@@ -926,6 +927,7 @@ function writeUrlHashKey(key: string, value: string): void {
       key !== KIOSK_SETTINGS_STORAGE_KEY &&
       key !== KIOSK_LOCK_STORAGE_KEY &&
       key !== PIN_STORAGE_KEY &&
+      key !== AUTH_ACCOUNTS_STORAGE_KEY &&
       key !== MAIN_STORAGE_KEY &&
       key !== 'washmen_break_tracker_v2'
     ) {
@@ -1090,10 +1092,7 @@ export const WASHMEN_LOGO_FALLBACK =
  * so Chrome never logs ERR_FILE_NOT_FOUND for /washmen-logo.png.
  */
 export function getWashmenLogoSrc(): string {
-  if (isLocalFileProtocol()) {
-    return WASHMEN_LOGO_FALLBACK;
-  }
-  return '/washmen-logo.png';
+  return WASHMEN_LOGO_FALLBACK;
 }
 
 /**
@@ -1203,6 +1202,7 @@ function injectEmbeddedStateIntoHtml(html: string): string {
     const settingsData = safeGetStorage(KIOSK_SETTINGS_STORAGE_KEY);
     const pinData = safeGetStorage(PIN_STORAGE_KEY);
     const lockData = safeGetStorage(KIOSK_LOCK_STORAGE_KEY);
+    const authAccountsData = safeGetStorage(AUTH_ACCOUNTS_STORAGE_KEY);
     if (mainData) {
       statePayload[MAIN_STORAGE_KEY] = mainData;
       statePayload['washmen_break_tracker_v2'] = mainData;
@@ -1210,6 +1210,7 @@ function injectEmbeddedStateIntoHtml(html: string): string {
     if (settingsData) statePayload[KIOSK_SETTINGS_STORAGE_KEY] = settingsData;
     if (pinData) statePayload[PIN_STORAGE_KEY] = pinData;
     if (lockData) statePayload[KIOSK_LOCK_STORAGE_KEY] = lockData;
+    if (authAccountsData) statePayload[AUTH_ACCOUNTS_STORAGE_KEY] = authAccountsData;
 
     const jsonText = JSON.stringify(statePayload).replace(/<\//g, '<\\/');
     const scriptTag = `<script id="washmen-embedded-state" data-system-architect="${devInfo.fullName}" data-created-by="${devInfo.createdByLabel}" data-signature="${devInfo.signatureHash}" type="application/json" style="display:none!important" hidden>${jsonText}</script>`;
@@ -1478,7 +1479,7 @@ export async function downloadSelfContainedHtml(
   const filename = customFilename || 'index.html';
   if (!isLocalFileProtocol()) {
     try {
-      const res = await fetch('/washmen-break-tracker.html', { cache: 'no-store' });
+      const res = await fetch('./washmen-break-tracker.html', { cache: 'no-store' });
       if (res.ok) {
         const htmlText = await res.text();
         if (htmlText && htmlText.includes('<html')) {
@@ -1504,26 +1505,149 @@ export async function downloadSelfContainedHtml(
   await downloadOrShareFile(filename, withState, 'text/html;charset=utf-8', preferShare);
 }
 
+// ============================================================================
+// 1 MANAGER & 4 SUPERVISORS LOGIN ACCOUNTS (WEB, GITHUB PAGES & ANDROID LOCAL)
+// ============================================================================
+
+export interface AuthAccount {
+  id: string;
+  role: 'Manager' | 'Supervisor';
+  slotLabel: string;
+  name: string;
+  username: string;
+  empId: string;
+  password: string;
+  defaultPassword: string;
+  updatedAt?: number;
+}
+
+export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
+  {
+    id: 'acc_manager',
+    role: 'Manager',
+    slotLabel: 'Manager Login',
+    name: 'Manager',
+    username: 'manager',
+    empId: 'MGR',
+    password: 'Manager@123',
+    defaultPassword: 'Manager@123',
+  },
+  {
+    id: 'acc_supervisor',
+    role: 'Supervisor',
+    slotLabel: 'Supervisor Login (4 Supervisors)',
+    name: 'Supervisor',
+    username: 'supervisor',
+    empId: 'SUP',
+    password: 'Supervisor@123',
+    defaultPassword: 'Supervisor@123',
+  },
+];
+
+export function normalizeAuthAccounts(raw: unknown): AuthAccount[] {
+  if (!Array.isArray(raw)) return DEFAULT_AUTH_ACCOUNTS.map((a) => ({ ...a }));
+  const mapById = new Map<string, Partial<AuthAccount>>();
+  for (const item of raw) {
+    if (item && typeof item === 'object' && typeof (item as AuthAccount).id === 'string') {
+      mapById.set((item as AuthAccount).id, item as Partial<AuthAccount>);
+    }
+  }
+  return DEFAULT_AUTH_ACCOUNTS.map((def) => {
+    const saved = mapById.get(def.id);
+    if (!saved) return { ...def };
+    return {
+      ...def,
+      username: String(saved.username || def.username).trim() || def.username,
+      password: String(saved.password || def.password).trim() || def.password,
+      updatedAt: Number(saved.updatedAt || 0) || undefined,
+    };
+  });
+}
+
+export function getStoredAuthAccounts(): AuthAccount[] {
+  try {
+    const raw = safeGetStorage(AUTH_ACCOUNTS_STORAGE_KEY);
+    if (raw) {
+      return normalizeAuthAccounts(JSON.parse(raw));
+    }
+    const savedMain = safeGetStorage(MAIN_STORAGE_KEY);
+    if (savedMain) {
+      const parsedMain = JSON.parse(savedMain);
+      if (Array.isArray(parsedMain?.authAccounts)) {
+        return normalizeAuthAccounts(parsedMain.authAccounts);
+      }
+    }
+  } catch {}
+  return DEFAULT_AUTH_ACCOUNTS.map((a) => ({ ...a }));
+}
+
+export function saveStoredAuthAccounts(accounts: AuthAccount[]): AuthAccount[] {
+  const normalized = normalizeAuthAccounts(accounts);
+  safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+export function authenticateLoginAccount(
+  accounts: AuthAccount[],
+  identifierInput: string,
+  passwordInput: string
+): AuthAccount | null {
+  const cleanId = String(identifierInput || '').trim().toLowerCase();
+  const cleanPass = String(passwordInput || '').trim();
+  if (!cleanId || !cleanPass) return null;
+
+  for (const acc of accounts) {
+    const matchesIdentifier =
+      acc.id.toLowerCase() === cleanId ||
+      acc.username.toLowerCase() === cleanId ||
+      acc.role.toLowerCase() === cleanId ||
+      acc.empId.toLowerCase() === cleanId ||
+      (acc.role === 'Manager' && (cleanId === 'admin' || cleanId === 'manager' || cleanId === 'mgr')) ||
+      (acc.role === 'Supervisor' && (cleanId === 'supervisor' || cleanId === 'sup' || cleanId === 'supervisors'));
+
+    const isDefaultPw = acc.password === acc.defaultPassword;
+    const matchesPassword =
+      acc.password === cleanPass || (isDefaultPw && cleanPass === 'Admin@123');
+
+    if (matchesIdentifier && matchesPassword) {
+      return acc;
+    }
+  }
+  return null;
+}
+
+export function isValidSupervisorOrManagerPassword(
+  accounts: AuthAccount[],
+  passwordInput: string
+): boolean {
+  const cleanPass = String(passwordInput || '').trim();
+  if (!cleanPass) return false;
+  if (cleanPass === 'Admin@123') return true;
+  return accounts.some((acc) => acc.password === cleanPass);
+}
+
 /**
  * Calls server-side verifyPin(pin) in Google Apps Script, with local fallback for preview & local Android tablet.
  */
 export function verifyPinOnServer(pin: string): Promise<{ valid: boolean; isDefaultPin: boolean }> {
   return new Promise((resolve) => {
     const clean = String(pin || '').trim();
+    const accounts = getStoredAuthAccounts();
+    const matchesAccountPass = isValidSupervisorOrManagerPassword(accounts, clean);
     const gas = (window as unknown as { google?: { script?: { run?: { withSuccessHandler: (cb: (res: { valid: boolean; isDefaultPin: boolean }) => void) => { withFailureHandler: (errCb: () => void) => { verifyPin: (p: string) => void } } } } } }).google?.script?.run;
     if (gas) {
       gas
         .withSuccessHandler((res) => resolve(res))
         .withFailureHandler(() => {
           const savedPin = safeGetStorage(PIN_STORAGE_KEY) || '0000';
-          resolve({ valid: clean === savedPin || clean === 'Admin@123', isDefaultPin: savedPin === '0000' });
+          resolve({ valid: clean === savedPin || matchesAccountPass, isDefaultPin: savedPin === '0000' });
         })
         .verifyPin(clean);
       return;
     }
     const savedPin = safeGetStorage(PIN_STORAGE_KEY) || '0000';
     resolve({
-      valid: clean === savedPin || clean === 'Admin@123',
+      valid: clean === savedPin || matchesAccountPass,
       isDefaultPin: savedPin === '0000',
     });
   });
@@ -1543,6 +1667,8 @@ export function changePinOnServer(
       resolve({ ok: false, error: 'New PIN must be at least 4 digits.' });
       return;
     }
+    const accounts = getStoredAuthAccounts();
+    const matchesAccountPass = isValidSupervisorOrManagerPassword(accounts, cleanOld);
     const gas = (window as unknown as { google?: { script?: { run?: { withSuccessHandler: (cb: (res: { ok: boolean; error?: string; isDefaultPin?: boolean }) => void) => { withFailureHandler: (errCb: () => void) => { changeSupervisorPin: (o: string, n: string) => void } } } } } }).google?.script?.run;
     if (gas) {
       gas
@@ -1555,7 +1681,7 @@ export function changePinOnServer(
       return;
     }
     const savedPin = safeGetStorage(PIN_STORAGE_KEY) || '0000';
-    if (cleanOld !== savedPin && cleanOld !== 'Admin@123') {
+    if (cleanOld !== savedPin && !matchesAccountPass) {
       resolve({ ok: false, error: 'Current PIN or Supervisor Password is incorrect.' });
       return;
     }

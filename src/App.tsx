@@ -33,13 +33,22 @@ import {
   Calendar,
   Tablet,
   WifiOff,
-  Flag
+  Flag,
+  LogOut,
+  UserCheck
 } from 'lucide-react';
 import EmployeeKiosk from './EmployeeKiosk';
 import KioskSettingsCard from './KioskSettingsCard';
+import { LoginPage, AccountPasswordManagerCard } from './LoginPage';
 import {
   KioskSettings,
   DEFAULT_KIOSK_SETTINGS,
+  AuthAccount,
+  AUTH_ACCOUNTS_STORAGE_KEY,
+  getStoredAuthAccounts,
+  saveStoredAuthAccounts,
+  normalizeAuthAccounts,
+  isValidSupervisorOrManagerPassword,
   mergeState,
   getDubaiTimeInfo,
   isUsingDefaultPin,
@@ -234,8 +243,24 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
 
-  // Restore Official Roster In-Page Confirmation Modal (replaces confirm())
+  // Restore Default Roster In-Page Confirmation Modal (replaces confirm())
   const [restoreRosterModalOpen, setRestoreRosterModalOpen] = useState<boolean>(false);
+
+  // 1 Manager & 4 Supervisors Login Accounts + Active Session State
+  const [authAccounts, setAuthAccounts] = useState<AuthAccount[]>(() => getStoredAuthAccounts());
+  const [loggedInAccount, setLoggedInAccount] = useState<AuthAccount | null>(null);
+
+  const handleUpdateAuthAccounts = useCallback(
+    (nextAccounts: AuthAccount[]) => {
+      const normalized = saveStoredAuthAccounts(nextAccounts);
+      setAuthAccounts(normalized);
+      if (loggedInAccount) {
+        const updatedCurrent = normalized.find((a) => a.id === loggedInAccount.id);
+        if (updatedCurrent) setLoggedInAccount(updatedCurrent);
+      }
+    },
+    [loggedInAccount]
+  );
 
   // Settings Tab Server PIN Protection
   const [settingsPinUnlocked, setSettingsPinUnlocked] = useState<boolean>(false);
@@ -462,6 +487,10 @@ export default function App() {
               setKioskSettings(bestSettings);
               safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(bestSettings));
             }
+            if (Array.isArray(parsed.authAccounts)) {
+              const normAcc = saveStoredAuthAccounts(parsed.authAccounts);
+              setAuthAccounts(normAcc);
+            }
             return true;
           }
         }
@@ -470,6 +499,17 @@ export default function App() {
       }
       return false;
     };
+
+    loadStorageWithIdbFallback(AUTH_ACCOUNTS_STORAGE_KEY).then((idbAuthRaw) => {
+      if (idbAuthRaw) {
+        try {
+          const parsedAcc = JSON.parse(idbAuthRaw);
+          if (Array.isArray(parsedAcc)) {
+            setAuthAccounts(normalizeAuthAccounts(parsedAcc));
+          }
+        } catch {}
+      }
+    });
 
     const saved = safeGetStorage(STORAGE_KEY) || safeGetStorage('washmen_break_tracker_v2');
     if (saved && applyLoadedJson(saved)) {
@@ -559,14 +599,16 @@ export default function App() {
           deletedStaff,
           closedBreakIds,
           kioskSettings,
+          authAccounts,
           _systemArchitect: _APP_VERIFIED_DEV.fullName,
           _createdBy: _APP_VERIFIED_DEV.createdByLabel,
           _developerSignature: _APP_VERIFIED_DEV.signatureHash,
         })
       );
       safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(kioskSettings));
+      safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(authAccounts));
     }
-  }, [staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings]);
+  }, [staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings, authAccounts]);
 
   // Isolated credit container ref & lightweight 30-second throttled watchdog
   const dashboardCreditContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1020,14 +1062,14 @@ export default function App() {
     setSupervisorResetNotes('');
   };
 
-  // Verify Supervisor Password
+  // Verify Supervisor Password (accepts any of the 4 Supervisor / 1 Manager passwords or Admin@123)
   const verifySupervisorPassword = (e: React.FormEvent) => {
     e.preventDefault();
-    if (supervisorPasswordInput.trim() === 'Admin@123') {
+    if (isValidSupervisorOrManagerPassword(authAccounts, supervisorPasswordInput)) {
       setSupervisorUnlocked(true);
       setSupervisorPasswordError('');
     } else {
-      setSupervisorPasswordError('Incorrect supervisor password. Please try again.');
+      setSupervisorPasswordError('Incorrect supervisor or manager password. Please try again.');
     }
   };
 
@@ -1283,7 +1325,16 @@ export default function App() {
   // Export Full JSON Backup (with optional Android Share sheet)
   const exportJSONBackup = async (preferShare: boolean = false) => {
     const data = JSON.stringify(
-      { staff, activeBreaks, logs, deletedLogs, deletedStaff, kioskSettings, exportedAt: new Date().toISOString() },
+      {
+        staff,
+        activeBreaks,
+        logs,
+        deletedLogs,
+        deletedStaff,
+        kioskSettings,
+        authAccounts,
+        exportedAt: new Date().toISOString(),
+      },
       null,
       2
     );
@@ -1313,12 +1364,16 @@ export default function App() {
           const nextSettings = parsed.kioskSettings
             ? { ...DEFAULT_KIOSK_SETTINGS, ...parsed.kioskSettings, updatedAt: Date.now() }
             : kioskSettings;
+          const nextAccounts = Array.isArray(parsed.authAccounts)
+            ? saveStoredAuthAccounts(parsed.authAccounts)
+            : authAccounts;
           setStaff(nextStaff);
           setActiveBreaks(nextActive);
           setLogs(nextLogs);
           setDeletedLogs(nextDelLogs);
           setDeletedStaff(nextDelStaff);
           setKioskSettings(nextSettings);
+          setAuthAccounts(nextAccounts);
           const fullRestored = {
             staff: nextStaff,
             activeBreaks: nextActive,
@@ -1327,11 +1382,12 @@ export default function App() {
             deletedStaff: nextDelStaff,
             closedBreakIds,
             kioskSettings: nextSettings,
+            authAccounts: nextAccounts,
           };
           stateRef.current = fullRestored;
           safeSetStorage(STORAGE_KEY, JSON.stringify(fullRestored));
           safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
-          showToast('Database successfully restored from JSON backup', 'success');
+          showToast('Database & login accounts successfully restored from JSON backup', 'success');
         } else {
           showToast('Invalid backup file structure', 'danger');
         }
@@ -1461,8 +1517,8 @@ export default function App() {
   // Handle Supervisor Password Protected Dashboard Reset
   const handleConfirmDashboardReset = (e: React.FormEvent) => {
     e.preventDefault();
-    if (dashboardResetPassword !== 'Admin@123') {
-      setDashboardResetError('Incorrect supervisor password. Authorization denied.');
+    if (!isValidSupervisorOrManagerPassword(authAccounts, dashboardResetPassword)) {
+      setDashboardResetError('Incorrect supervisor or manager password. Authorization denied.');
       return;
     }
     setDashboardResetError('');
@@ -1526,6 +1582,43 @@ export default function App() {
       return bElapsed - aElapsed;
     });
   }, [activeBreaks, currentTime, kioskSettings.needsReviewRunningMins]);
+
+  // ================= LOGIN GATE (1 MANAGER & 4 SUPERVISORS MUST LOG IN BEFORE ENTERING DASHBOARD) =================
+  if (!loggedInAccount) {
+    return (
+      <>
+        <LoginPage
+          accounts={authAccounts}
+          currentTime={currentTime}
+          onLoginSuccess={(acc) => {
+            setLoggedInAccount(acc);
+            setIsKioskLocked(false);
+            setCurrentTab('dashboard');
+            setSettingsPinUnlocked(true);
+            showToast(`Signed in as ${acc.role}`, 'success');
+          }}
+        />
+        {toast && (
+          <div className="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none">
+            <div
+              className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl text-xs font-bold text-white flex items-center space-x-2.5 ${
+                toast.type === 'success'
+                  ? 'bg-emerald-600'
+                  : toast.type === 'danger'
+                  ? 'bg-rose-600'
+                  : toast.type === 'warning'
+                  ? 'bg-amber-600'
+                  : 'bg-[#251B7C]'
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{toast.message}</span>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
 
   // ================= FROZEN KIOSK MODE (When on Kiosk tab or locked tablet — hides all Supervisor headers/tabs/footers) =================
   if (isKioskLocked || currentTab === 'kiosk') {
@@ -1613,7 +1706,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Shift Switcher, Sound & Live Clock */}
+          {/* Shift Switcher, Sound, Active User Badge, Logout & Live Clock */}
           <div className="flex items-center flex-wrap gap-3">
             {/* Shift Switcher */}
             <div className="bg-[#1C1466] p-1 rounded-xl border border-white/10 flex items-center space-x-1 shadow-inner">
@@ -1655,7 +1748,7 @@ export default function App() {
                 showToast(soundEnabled ? 'Alarm sound muted' : 'Alarm sound enabled', 'info');
               }}
               title={soundEnabled ? 'Mute Alert Chimes' : 'Enable Alert Chimes'}
-              className="p-2 bg-[#1C1466] hover:bg-[#17105C] text-indigo-200 hover:text-white border border-white/10 rounded-xl transition"
+              className="p-2 bg-[#1C1466] hover:bg-[#17105C] text-indigo-200 hover:text-white border border-white/10 rounded-xl transition cursor-pointer"
             >
               {soundEnabled ? <Volume2 className="w-4 h-4 text-emerald-300" /> : <VolumeX className="w-4 h-4 text-indigo-400" />}
             </button>
@@ -1668,6 +1761,34 @@ export default function App() {
               <div className="text-xs font-black font-mono text-cyan-300">
                 {currentTime.toLocaleTimeString('en-US', { hour12: true })}
               </div>
+            </div>
+
+            {/* Logged-in User Badge & Logout Button */}
+            <div className="bg-[#1C1466] px-3 py-1.5 rounded-xl border border-white/15 flex items-center space-x-2.5">
+              <div className="flex items-center space-x-1.5">
+                <UserCheck className="w-4 h-4 text-emerald-300 shrink-0" />
+                <div className="text-left">
+                  <span className="block text-[9px] uppercase tracking-wider font-extrabold text-indigo-300 leading-none">
+                    Active Session
+                  </span>
+                  <span className="block text-xs font-black text-white leading-tight">
+                    {loggedInAccount.role}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoggedInAccount(null);
+                  setSettingsPinUnlocked(false);
+                  showToast('Logged out successfully', 'info');
+                }}
+                className="px-2.5 py-1 rounded-lg bg-rose-500/90 hover:bg-rose-600 text-white font-bold text-[11px] transition flex items-center space-x-1 cursor-pointer"
+                title="Logout and return to Login Page"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Logout</span>
+              </button>
             </div>
           </div>
         </div>
@@ -2956,6 +3077,15 @@ export default function App() {
               </div>
             ) : (
               <>
+                {/* 1 MANAGER & 4 SUPERVISORS LOGIN ACCOUNTS & PASSWORD RESET SECTION */}
+                <AccountPasswordManagerCard
+                  accounts={authAccounts}
+                  currentUser={loggedInAccount}
+                  onUpdateAccounts={handleUpdateAuthAccounts}
+                  onDownloadUpdatedHtml={() => downloadStandaloneHTML(false, 'index.html')}
+                  showToast={showToast}
+                />
+
                 {/* KIOSK SETTINGS SECTION (Supervisor & Manager Only) */}
                 <KioskSettingsCard
                   kioskSettings={kioskSettings}
@@ -2977,13 +3107,22 @@ export default function App() {
             <div className="bg-white p-6 rounded-2xl border border-[#E4E7F2] space-y-4 shadow-sm">
               <h3 className="font-bold text-[#171262] flex items-center space-x-2 text-sm">
                 <FileSpreadsheet className="w-4 h-4 text-[#4D3FDC]" />
-                <span>Backup &amp; Data Portability (Android &amp; PC)</span>
+                <span>Backup &amp; Data Portability (GitHub Pages, PC &amp; Android Local Storage)</span>
               </h3>
               <p className="text-xs text-[#5C5A85]">
-                Export or share a full JSON backup of the current roster and break audit logs. You can restore this file on any Android tablet or PC.
+                Export or share a full JSON backup or download an updated self-contained index.html file with your latest roster, break settings, and login passwords embedded inside.
               </p>
 
               <div className="flex flex-wrap gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => downloadStandaloneHTML(false, 'index.html')}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2.5 rounded-xl text-xs transition flex items-center space-x-2 shadow-sm cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-white" />
+                  <span>Download index.html (GitHub Pages / Android Local)</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => exportJSONBackup(false)}
