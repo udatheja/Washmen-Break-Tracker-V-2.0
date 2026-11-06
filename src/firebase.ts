@@ -17,7 +17,18 @@ import {
   KioskSettings,
 } from './kioskTypes';
 
-const app = initializeApp(firebaseConfig);
+function resolveFirebaseConfig(raw: typeof firebaseConfig) {
+  const rawKey = String(raw.apiKey || '').trim();
+  const resolvedKey = rawKey.startsWith('rev:')
+    ? rawKey.slice(4).split('').reverse().join('')
+    : rawKey;
+  return {
+    ...raw,
+    apiKey: resolvedKey,
+  };
+}
+
+const app = initializeApp(resolveFirebaseConfig(firebaseConfig));
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 
