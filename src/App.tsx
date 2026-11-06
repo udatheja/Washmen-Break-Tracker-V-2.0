@@ -40,6 +40,7 @@ import {
 import EmployeeKiosk from './EmployeeKiosk';
 import KioskSettingsCard from './KioskSettingsCard';
 import { LoginPage, AccountPasswordManagerCard } from './LoginPage';
+import { pushCloudStationSync, subscribeToCloudStationSync } from './firebase';
 import {
   KioskSettings,
   DEFAULT_KIOSK_SETTINGS,
@@ -49,6 +50,7 @@ import {
   ACTIVE_TAB_STORAGE_KEY,
   getStoredAuthAccounts,
   saveStoredAuthAccounts,
+  mergeAuthAccounts,
   getStoredAuthSession,
   saveStoredAuthSession,
   clearStoredAuthSession,
@@ -283,6 +285,10 @@ export default function App() {
     (nextAccounts: AuthAccount[]) => {
       const normalized = saveStoredAuthAccounts(nextAccounts);
       setAuthAccounts(normalized);
+      stateRef.current = {
+        ...stateRef.current,
+        authAccounts: normalized,
+      };
       if (loggedInAccount) {
         const updatedCurrent = normalized.find((a) => a.id === loggedInAccount.id);
         if (updatedCurrent) {
@@ -290,6 +296,18 @@ export default function App() {
           saveStoredAuthSession(updatedCurrent);
         }
       }
+      void pushCloudStationSync({
+        authAccounts: normalized,
+        staff: stateRef.current.staff,
+        activeBreaks: stateRef.current.activeBreaks,
+        logs: stateRef.current.logs,
+        deletedLogs: stateRef.current.deletedLogs,
+        deletedStaff: stateRef.current.deletedStaff,
+        closedBreakIds: stateRef.current.closedBreakIds,
+        kioskSettings: stateRef.current.kioskSettings,
+        updatedByRole: loggedInAccount?.role || 'Manager',
+        updatedAtMs: Date.now(),
+      });
     },
     [loggedInAccount]
   );
@@ -395,7 +413,7 @@ export default function App() {
     }
   }, [soundEnabled]);
 
-  // Ref holding latest state for serverSync
+  // Ref holding latest state for serverSync and cloud sync
   const stateRef = useRef({
     staff,
     activeBreaks,
@@ -404,12 +422,22 @@ export default function App() {
     deletedStaff,
     closedBreakIds,
     kioskSettings,
+    authAccounts,
   });
   useEffect(() => {
-    stateRef.current = { staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings };
-  }, [staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings]);
+    stateRef.current = {
+      staff,
+      activeBreaks,
+      logs,
+      deletedLogs,
+      deletedStaff,
+      closedBreakIds,
+      kioskSettings,
+      authAccounts,
+    };
+  }, [staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings, authAccounts]);
 
-  // Shared serverSync function (works with google.script.run.syncState and local BroadcastChannel/storage)
+  // Shared serverSync function (syncs immediately with Firebase Firestore across all devices worldwide + local storage + GAS fallback)
   const serverSync = useCallback((overridePartial?: Partial<typeof stateRef.current>) => {
     const payload = {
       ...stateRef.current,
@@ -423,24 +451,50 @@ export default function App() {
         const existingRaw = safeGetStorage(STORAGE_KEY);
         const existingParsed = existingRaw ? JSON.parse(existingRaw) : {};
         const mergedLocal = mergeState(existingParsed, payload);
+        const mergedAccounts = mergeAuthAccounts(existingParsed?.authAccounts, payload.authAccounts);
+        const nextStaffCleaned = mergedLocal.staff.filter((s) => !EXCLUDED_EMP_IDS.includes(String(s.empId)));
         stateRef.current = {
-          staff: mergedLocal.staff.filter((s) => !EXCLUDED_EMP_IDS.includes(String(s.empId))),
+          staff: nextStaffCleaned,
           activeBreaks: mergedLocal.activeBreaks,
           logs: mergedLocal.logs,
           deletedLogs: mergedLocal.deletedLogs,
           deletedStaff: mergedLocal.deletedStaff || [],
           closedBreakIds: mergedLocal.closedBreakIds || [],
           kioskSettings: mergedLocal.kioskSettings,
+          authAccounts: mergedAccounts,
         };
-        safeSetStorage(STORAGE_KEY, JSON.stringify(mergedLocal));
+        safeSetStorage(
+          STORAGE_KEY,
+          JSON.stringify({
+            ...mergedLocal,
+            staff: nextStaffCleaned,
+            authAccounts: mergedAccounts,
+          })
+        );
         safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(mergedLocal.kioskSettings));
-        setStaff(stateRef.current.staff);
+        saveStoredAuthAccounts(mergedAccounts);
+        setStaff(nextStaffCleaned);
         setActiveBreaks(mergedLocal.activeBreaks);
         setLogs(mergedLocal.logs);
         setDeletedLogs(mergedLocal.deletedLogs);
         setDeletedStaff(mergedLocal.deletedStaff || []);
         if (mergedLocal.closedBreakIds) setClosedBreakIds(mergedLocal.closedBreakIds);
         setKioskSettings(mergedLocal.kioskSettings);
+        setAuthAccounts(mergedAccounts);
+
+        // Push real-time state to Firebase Firestore so all devices worldwide receive updates immediately
+        void pushCloudStationSync({
+          authAccounts: mergedAccounts,
+          staff: nextStaffCleaned,
+          activeBreaks: mergedLocal.activeBreaks,
+          logs: mergedLocal.logs,
+          deletedLogs: mergedLocal.deletedLogs,
+          deletedStaff: mergedLocal.deletedStaff || [],
+          closedBreakIds: mergedLocal.closedBreakIds || [],
+          kioskSettings: mergedLocal.kioskSettings,
+          updatedByRole: 'station',
+          updatedAtMs: Date.now(),
+        });
       } catch {}
     }
 
@@ -644,6 +698,131 @@ export default function App() {
         setCurrentTab('kiosk');
       }
     });
+  }, []);
+
+  // 1b. Real-time Firebase Firestore subscription across all devices worldwide (runs unconditionally on boot)
+  useEffect(() => {
+    const unsubscribeCloud = subscribeToCloudStationSync(
+      (cloudData, exists) => {
+        if (!exists || !cloudData) {
+          const seedToCloud = () => {
+            if (stateRef.current.staff.length > 0) {
+              void pushCloudStationSync({
+                authAccounts: stateRef.current.authAccounts,
+                staff: stateRef.current.staff,
+                activeBreaks: stateRef.current.activeBreaks,
+                logs: stateRef.current.logs,
+                deletedLogs: stateRef.current.deletedLogs,
+                deletedStaff: stateRef.current.deletedStaff,
+                closedBreakIds: stateRef.current.closedBreakIds,
+                kioskSettings: stateRef.current.kioskSettings,
+                updatedByRole: 'seed',
+                updatedAtMs: Date.now(),
+              });
+            }
+          };
+          if (isStorageHydratedRef.current && stateRef.current.staff.length > 0) {
+            seedToCloud();
+          } else {
+            window.setTimeout(seedToCloud, 600);
+          }
+          return;
+        }
+
+        try {
+          const localAccounts = stateRef.current.authAccounts;
+          const mergedAccounts = saveStoredAuthAccounts(
+            mergeAuthAccounts(localAccounts, cloudData.authAccounts)
+          );
+          setAuthAccounts(mergedAccounts);
+          setLoggedInAccount((prevLogged) => {
+            if (!prevLogged) return null;
+            const updatedCurrent = mergedAccounts.find((a) => a.id === prevLogged.id);
+            if (updatedCurrent) {
+              saveStoredAuthSession(updatedCurrent);
+              return updatedCurrent;
+            }
+            return prevLogged;
+          });
+
+          const mergedState = mergeState(stateRef.current, {
+            staff: cloudData.staff,
+            activeBreaks: cloudData.activeBreaks,
+            logs: cloudData.logs,
+            deletedLogs: cloudData.deletedLogs,
+            deletedStaff: cloudData.deletedStaff,
+            closedBreakIds: cloudData.closedBreakIds,
+            kioskSettings: cloudData.kioskSettings,
+          });
+          const cleanedStaff = mergedState.staff.filter(
+            (s) => !EXCLUDED_EMP_IDS.includes(String(s.empId))
+          );
+
+          stateRef.current = {
+            staff: cleanedStaff,
+            activeBreaks: mergedState.activeBreaks,
+            logs: mergedState.logs,
+            deletedLogs: mergedState.deletedLogs,
+            deletedStaff: mergedState.deletedStaff || [],
+            closedBreakIds: mergedState.closedBreakIds || [],
+            kioskSettings: mergedState.kioskSettings,
+            authAccounts: mergedAccounts,
+          };
+
+          if (cleanedStaff.length > 0) {
+            setStaff(cleanedStaff);
+          }
+          setActiveBreaks(mergedState.activeBreaks);
+          setLogs(mergedState.logs);
+          setDeletedLogs(mergedState.deletedLogs);
+          setDeletedStaff(mergedState.deletedStaff || []);
+          setClosedBreakIds(mergedState.closedBreakIds || []);
+          setKioskSettings(mergedState.kioskSettings);
+
+          safeSetStorage(
+            STORAGE_KEY,
+            JSON.stringify({
+              ...mergedState,
+              staff: cleanedStaff,
+              authAccounts: mergedAccounts,
+            })
+          );
+          safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(mergedState.kioskSettings));
+
+          // If this browser had a newer password or state than the cloud document, push the merged result to Firestore
+          const hasLocalNewerPassword = mergedAccounts.some((mAcc) => {
+            const cAcc = (cloudData.authAccounts || []).find((c) => c.id === mAcc.id);
+            return Number(mAcc.updatedAt || 0) > Number(cAcc?.updatedAt || 0);
+          });
+          const hasLocalNewerSettings =
+            Number(mergedState.kioskSettings?.updatedAt || 0) >
+            Number(cloudData.kioskSettings?.updatedAt || 0);
+          if (hasLocalNewerPassword || hasLocalNewerSettings) {
+            void pushCloudStationSync({
+              authAccounts: mergedAccounts,
+              staff: cleanedStaff,
+              activeBreaks: mergedState.activeBreaks,
+              logs: mergedState.logs,
+              deletedLogs: mergedState.deletedLogs,
+              deletedStaff: mergedState.deletedStaff || [],
+              closedBreakIds: mergedState.closedBreakIds || [],
+              kioskSettings: mergedState.kioskSettings,
+              updatedByRole: 'merge-sync',
+              updatedAtMs: Date.now(),
+            });
+          }
+        } catch (err) {
+          console.error('Failed to apply cloud sync snapshot:', err);
+        }
+      },
+      (connected) => {
+        if (connected) setIsOffline(false);
+      }
+    );
+
+    return () => {
+      unsubscribeCloud();
+    };
   }, []);
 
   // Save to LocalStorage / IndexedDB / window.name whenever state changes (after initial hydration)
@@ -1148,6 +1327,8 @@ export default function App() {
     const shiftSlots = getShiftBreakSlots(kioskSettings, resetModalStaff.shift);
 
     // Stop active running timer for this employee if any
+    const removedActiveIds = activeBreaks.filter((b) => b.staffId === staffId).map((b) => b.id);
+    const nextClosedBreakIds = Array.from(new Set([...closedBreakIds, ...removedActiveIds]));
     let nextActiveBreaks = activeBreaks.filter((b) => b.staffId !== staffId);
     let nextLogs = [...logs];
     let nextDeletedLogs = [...deletedLogs];
@@ -1259,7 +1440,13 @@ export default function App() {
     setActiveBreaks(nextActiveBreaks);
     setLogs(nextLogs);
     setDeletedLogs(nextDeletedLogs);
-    serverSync({ activeBreaks: nextActiveBreaks, logs: nextLogs, deletedLogs: nextDeletedLogs });
+    setClosedBreakIds(nextClosedBreakIds);
+    serverSync({
+      activeBreaks: nextActiveBreaks,
+      logs: nextLogs,
+      deletedLogs: nextDeletedLogs,
+      closedBreakIds: nextClosedBreakIds,
+    });
     setResetModalStaff(null);
   };
 
@@ -1271,16 +1458,20 @@ export default function App() {
 
     // Remove from staff, record in deletedStaff so mergeState never resurrects it, and clear any running active breaks
     const nextStaff = staff.filter((s) => s.id !== memberId);
+    const removedBreakIds = activeBreaks.filter((b) => b.staffId !== memberId).map((b) => b.id);
+    const nextClosedBreakIds = Array.from(new Set([...closedBreakIds, ...removedBreakIds]));
     const nextActiveBreaks = activeBreaks.filter((b) => b.staffId !== memberId);
     const nextDeletedStaff = Array.from(new Set([...deletedStaff, memberId]));
 
     setStaff(nextStaff);
     setActiveBreaks(nextActiveBreaks);
     setDeletedStaff(nextDeletedStaff);
+    setClosedBreakIds(nextClosedBreakIds);
     serverSync({
       staff: nextStaff,
       activeBreaks: nextActiveBreaks,
       deletedStaff: nextDeletedStaff,
+      closedBreakIds: nextClosedBreakIds,
     });
 
     showToast(`Permanently deleted ${memberName} from the staff roster`, 'info');
@@ -1586,11 +1777,18 @@ export default function App() {
     if (dashboardResetAction === 'today') {
       const removedTodayIds = logs.filter((l) => l.date === todayStr).map((l) => l.id);
       const nextDeletedLogs = Array.from(new Set([...deletedLogs, ...removedTodayIds]));
+      const nextClosedBreakIds = Array.from(new Set([...closedBreakIds, ...activeBreaks.map((b) => b.id)]));
       const nextLogs = logs.filter((l) => l.date !== todayStr);
       setActiveBreaks([]);
       setLogs(nextLogs);
       setDeletedLogs(nextDeletedLogs);
-      serverSync({ activeBreaks: [], logs: nextLogs, deletedLogs: nextDeletedLogs });
+      setClosedBreakIds(nextClosedBreakIds);
+      serverSync({
+        activeBreaks: [],
+        logs: nextLogs,
+        deletedLogs: nextDeletedLogs,
+        closedBreakIds: nextClosedBreakIds,
+      });
       showToast("Today's dashboard & active break timers reset to zero", 'success');
     } else if (dashboardResetAction === 'factory') {
       const nowIso = new Date().toISOString();
@@ -1606,19 +1804,22 @@ export default function App() {
       }));
       const allOldLogIds = logs.map((l) => l.id);
       const nextDeletedLogs = Array.from(new Set([...deletedLogs, ...allOldLogIds]));
+      const nextClosedBreakIds = Array.from(new Set([...closedBreakIds, ...activeBreaks.map((b) => b.id)]));
       setStaff(factoryStaff);
       setActiveBreaks([]);
       setLogs([]);
       setDeletedLogs(nextDeletedLogs);
       setDeletedStaff([]);
+      setClosedBreakIds(nextClosedBreakIds);
       const factoryState = {
         staff: factoryStaff,
         activeBreaks: [],
         logs: [],
         deletedLogs: nextDeletedLogs,
         deletedStaff: [],
-        closedBreakIds: [],
+        closedBreakIds: nextClosedBreakIds,
         kioskSettings,
+        authAccounts,
       };
       stateRef.current = factoryState;
       safeSetStorage(STORAGE_KEY, JSON.stringify(factoryState));

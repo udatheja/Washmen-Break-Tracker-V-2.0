@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { execSync } from 'child_process';
 import esbuild from 'esbuild';
 
@@ -24,8 +25,15 @@ execSync('npx vite build', {
 
 const assetsDir = path.join('dist', 'assets');
 const files = fs.readdirSync(assetsDir);
-const cssFile = files.find((f) => f.endsWith('.css'));
-const jsFile = files.find((f) => f.endsWith('.js'));
+const cssFiles = files
+  .filter((f) => f.endsWith('.css'))
+  .sort((a, b) => fs.statSync(path.join(assetsDir, b)).mtimeMs - fs.statSync(path.join(assetsDir, a)).mtimeMs);
+const jsFiles = files
+  .filter((f) => f.endsWith('.js'))
+  .sort((a, b) => fs.statSync(path.join(assetsDir, b)).mtimeMs - fs.statSync(path.join(assetsDir, a)).mtimeMs);
+
+const cssFile = cssFiles[0];
+const jsFile = jsFiles[0];
 
 if (!cssFile || !jsFile) {
   console.error('Missing compiled assets in dist/assets:', files);
@@ -43,11 +51,13 @@ const jsContent = esbuild
     loader: 'js',
     minify: true,
     legalComments: 'none',
-     define: { 'process.env.NODE_ENV': '"production"' },
+    define: { 'process.env.NODE_ENV': '"production"' },
   })
   .code.trim();
 
-const jsBase64 = Buffer.from(jsContent, 'utf8').toString('base64');
+const jsGzipBase64 = zlib
+  .gzipSync(Buffer.from(jsContent, 'utf8'), { level: 9 })
+  .toString('base64');
 const buildVersion = Date.now().toString(36);
 
 const singleFileHtml = `<!doctype html>
@@ -76,7 +86,7 @@ const singleFileHtml = `<!doctype html>
   </head>
   <body class="bg-[#F6F7FC] text-[#171262] antialiased selection:bg-[#4D3FDC] selection:text-white">
     <div id="root"></div>
-    <script id="washmen-bundle-b64" type="text/plain">${jsBase64}</script>
+    <script id="washmen-bundle-gz-b64" type="text/plain">${jsGzipBase64}</script>
     <script>
       (function() {
         try {
@@ -109,7 +119,7 @@ const singleFileHtml = `<!doctype html>
           if (window.__WASHMEN_APP_MOUNTED__) return;
           window.__WASHMEN_APP_MOUNTED__ = true;
           try {
-            var b64El = document.getElementById("washmen-bundle-b64");
+            var b64El = document.getElementById("washmen-bundle-gz-b64");
             if (!b64El) return;
             var b64 = b64El.textContent.trim();
             var binStr = window.atob(b64);
@@ -118,11 +128,16 @@ const singleFileHtml = `<!doctype html>
             for (var i = 0; i < len; i++) {
               bytes[i] = binStr.charCodeAt(i);
             }
-            var code = new TextDecoder("utf-8").decode(bytes);
-            var s = document.createElement("script");
-            s.setAttribute("data-washmen-runtime", "true");
-            s.text = code;
-            document.body.appendChild(s);
+            var ds = new DecompressionStream("gzip");
+            var decompressedStream = new Blob([bytes]).stream().pipeThrough(ds);
+            new Response(decompressedStream).text().then(function(code) {
+              var s = document.createElement("script");
+              s.setAttribute("data-washmen-runtime", "true");
+              s.text = code;
+              document.body.appendChild(s);
+            }).catch(function(err) {
+              console.error("Failed to decompress embedded bundle:", err);
+            });
           } catch (err) {
             console.error("Failed to boot embedded bundle:", err);
           }
@@ -141,5 +156,5 @@ console.log('Built self-contained single-file release successfully:', {
   buildVersion,
   totalHtmlBytes: Buffer.byteLength(singleFileHtml, 'utf8'),
   cssBytes: cssContent.length,
-  jsBase64Bytes: jsBase64.length,
+  jsGzipBase64Bytes: jsGzipBase64.length,
 });

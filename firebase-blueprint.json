@@ -1,0 +1,88 @@
+{
+  "entities": {
+    "StationSync": {
+      "title": "StationSync",
+      "description": "Real-time global synchronization document for Washmen Wash & Fold Break Station across all devices worldwide.",
+      "type": "object",
+      "properties": {
+        "stationId": {
+          "type": "string",
+          "description": "Unique station identifier (washmen_wf_main).",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "syncToken": {
+          "type": "string",
+          "description": "Authorized Washmen station synchronization token.",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "authAccounts": {
+          "type": "array",
+          "description": "Manager and Supervisor login account credentials synced across all devices."
+        },
+        "staff": {
+          "type": "array",
+          "description": "Active Wash & Fold department employee roster."
+        },
+        "activeBreaks": {
+          "type": "array",
+          "description": "Currently running employee breaks in real time."
+        },
+        "logs": {
+          "type": "array",
+          "description": "Completed and soft-deleted break logs with audit metadata."
+        },
+        "deletedLogs": {
+          "type": "array",
+          "description": "IDs of permanently excluded break logs."
+        },
+        "deletedStaff": {
+          "type": "array",
+          "description": "IDs of deleted staff members."
+        },
+        "closedBreakIds": {
+          "type": "array",
+          "description": "IDs of active break sessions that have already been completed/closed."
+        },
+        "kioskSettings": {
+          "type": "object",
+          "description": "Configured shift timings, break durations, and kiosk governance settings."
+        },
+        "updatedByRole": {
+          "type": "string",
+          "description": "Role or source that performed the latest sync update.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "updatedAtMs": {
+          "type": "integer",
+          "description": "Epoch timestamp in milliseconds of the last update."
+        }
+      },
+      "required": [
+        "stationId",
+        "syncToken",
+        "authAccounts",
+        "staff",
+        "activeBreaks",
+        "logs",
+        "deletedLogs",
+        "deletedStaff",
+        "closedBreakIds",
+        "kioskSettings",
+        "updatedByRole",
+        "updatedAtMs"
+      ]
+    }
+  },
+  "firestore": {
+    "/station_sync/{stationId}": {
+      "schema": {
+        "$ref": "#/entities/StationSync"
+      },
+      "description": "Single global real-time sync state document for the Washmen Wash & Fold Break Station."
+    }
+  }
+}

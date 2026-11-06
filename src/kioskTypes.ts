@@ -412,7 +412,7 @@ export function mergeState(base: Partial<AppSyncState>, incoming: Partial<AppSyn
   });
   const staff = Array.from(staffMap.values());
 
-  // 2. Merge Logs by id (preserving voided logs for audit & active-break closure)
+  // 2. Merge Logs by id (preserving voided & soft-deleted logs for audit & active-break closure)
   const logMap = new Map<string, SyncableBreakLog>();
   (base.logs || []).forEach((l) => {
     if (l && l.id && !deletedSet.has(l.id)) logMap.set(l.id, l);
@@ -420,7 +420,21 @@ export function mergeState(base: Partial<AppSyncState>, incoming: Partial<AppSyn
   (incoming.logs || []).forEach((l) => {
     if (l && l.id && !deletedSet.has(l.id)) {
       const prev = logMap.get(l.id);
-      logMap.set(l.id, prev ? { ...prev, ...l } : l);
+      if (!prev) {
+        logMap.set(l.id, l);
+      } else {
+        const mergedLog: SyncableBreakLog = { ...prev, ...l };
+        if (prev.deleted || l.deleted) {
+          mergedLog.deleted = true;
+          mergedLog.deletedAt = l.deletedAt || prev.deletedAt;
+          mergedLog.deletedDate = l.deletedDate || prev.deletedDate;
+          mergedLog.deletedBy = l.deletedBy || prev.deletedBy;
+        }
+        if (prev.voided || l.voided) {
+          mergedLog.voided = true;
+        }
+        logMap.set(l.id, mergedLog);
+      }
     }
   });
   const logs = Array.from(logMap.values()).sort((a, b) =>
@@ -1579,6 +1593,24 @@ export function saveStoredAuthAccounts(accounts: AuthAccount[]): AuthAccount[] {
   const normalized = normalizeAuthAccounts(accounts);
   safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(normalized));
   return normalized;
+}
+
+export function mergeAuthAccounts(
+  baseAccounts: AuthAccount[] | undefined,
+  incomingAccounts: AuthAccount[] | undefined
+): AuthAccount[] {
+  const normBase = normalizeAuthAccounts(baseAccounts);
+  const normIncoming = normalizeAuthAccounts(incomingAccounts);
+  return DEFAULT_AUTH_ACCOUNTS.map((def) => {
+    const b = normBase.find((a) => a.id === def.id) || def;
+    const inc = normIncoming.find((a) => a.id === def.id) || def;
+    const bTime = Number(b.updatedAt || 0);
+    const incTime = Number(inc.updatedAt || 0);
+    if (incTime >= bTime) {
+      return { ...inc };
+    }
+    return { ...b };
+  });
 }
 
 export function getStoredAuthSession(accountsList?: AuthAccount[]): AuthAccount | null {

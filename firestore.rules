@@ -1,0 +1,119 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidStationSync(data) {
+      return data.keys().hasAll([
+          'stationId',
+          'syncToken',
+          'authAccounts',
+          'staff',
+          'activeBreaks',
+          'logs',
+          'deletedLogs',
+          'deletedStaff',
+          'closedBreakIds',
+          'kioskSettings',
+          'updatedByRole',
+          'updatedAtMs'
+        ])
+        && data.keys().hasOnly([
+          'stationId',
+          'syncToken',
+          'authAccounts',
+          'staff',
+          'activeBreaks',
+          'logs',
+          'deletedLogs',
+          'deletedStaff',
+          'closedBreakIds',
+          'kioskSettings',
+          'updatedByRole',
+          'updatedAtMs'
+        ])
+        && data.stationId is string
+        && data.stationId.size() >= 1
+        && data.stationId.size() <= 64
+        && data.stationId == 'washmen_wf_main'
+        && data.syncToken is string
+        && data.syncToken.size() >= 10
+        && data.syncToken.size() <= 64
+        && data.syncToken == 'UF-WASHMEN-WF-2026-SYNC'
+        && data.authAccounts is list
+        && data.authAccounts.size() <= 10
+        && (data.authAccounts.size() == 0 || data.authAccounts[0] is map)
+        && data.staff is list
+        && data.staff.size() <= 200
+        && (data.staff.size() == 0 || data.staff[0] is map)
+        && data.activeBreaks is list
+        && data.activeBreaks.size() <= 100
+        && (data.activeBreaks.size() == 0 || data.activeBreaks[0] is map)
+        && data.logs is list
+        && data.logs.size() <= 1000
+        && (data.logs.size() == 0 || data.logs[0] is map)
+        && data.deletedLogs is list
+        && data.deletedLogs.size() <= 1000
+        && (data.deletedLogs.size() == 0 || (data.deletedLogs[0] is string && data.deletedLogs[0].size() <= 128))
+        && data.deletedStaff is list
+        && data.deletedStaff.size() <= 200
+        && (data.deletedStaff.size() == 0 || (data.deletedStaff[0] is string && data.deletedStaff[0].size() <= 128))
+        && data.closedBreakIds is list
+        && data.closedBreakIds.size() <= 1000
+        && (data.closedBreakIds.size() == 0 || (data.closedBreakIds[0] is string && data.closedBreakIds[0].size() <= 128))
+        && data.kioskSettings is map
+        && data.kioskSettings.size() <= 50
+        && data.updatedByRole is string
+        && data.updatedByRole.size() >= 1
+        && data.updatedByRole.size() <= 64
+        && data.updatedAtMs is int
+        && data.updatedAtMs > 0;
+    }
+
+    match /station_sync/{stationId} {
+      allow get: if isValidId(stationId) && stationId == 'washmen_wf_main';
+      allow list: if false;
+      allow create: if isValidId(stationId)
+        && stationId == 'washmen_wf_main'
+        && isValidStationSync(incoming());
+      allow update: if isValidStationSync(incoming())
+        && isValidId(stationId)
+        && stationId == 'washmen_wf_main'
+        && incoming().stationId == existing().stationId
+        && incoming().syncToken == existing().syncToken
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'authAccounts',
+          'staff',
+          'activeBreaks',
+          'logs',
+          'deletedLogs',
+          'deletedStaff',
+          'closedBreakIds',
+          'kioskSettings',
+          'updatedByRole',
+          'updatedAtMs'
+        ]);
+      allow delete: if false;
+    }
+
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list, create, update, delete: if false;
+    }
+  }
+}
