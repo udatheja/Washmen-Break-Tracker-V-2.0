@@ -37,7 +37,7 @@ interface LoginPageProps {
 
 export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPageProps) {
   const [selectedAccountId, setSelectedAccountId] = useState<string>(accounts[0]?.id || 'acc_manager');
-  const [usernameInput, setUsernameInput] = useState<string>(accounts[0]?.username || 'manager');
+  const [usernameInput, setUsernameInput] = useState<string>(accounts[0]?.username || 'Manager');
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string>('');
@@ -132,35 +132,36 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
       {/* Main Login Content (PC & Tablet Optimized) */}
       <main className="flex-1 flex items-center justify-center px-4 sm:px-6 lg:px-8 py-8">
         <div className="max-w-4xl w-full grid grid-cols-1 lg:grid-cols-12 bg-white rounded-3xl shadow-xl border border-[#E4E7F2] overflow-hidden">
-          {/* Left Column: Role Selection (1 Manager Login + 1 Shared Supervisor Login) */}
+          {/* Left Column: Role Selection (Manager, Supervisor, Display Kiosk-Only) */}
           <div className="lg:col-span-6 bg-[#251B7C] text-white p-6 sm:p-8 flex flex-col justify-between space-y-6">
             <div className="space-y-4">
               <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-lg bg-[#4D3FDC] text-xs font-bold text-cyan-200">
                 <Lock className="w-3.5 h-3.5" />
-                <span>Manager &amp; Supervisor Portal</span>
+                <span>Manager, Supervisor &amp; Display Kiosk Portal</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
                 Wash &amp; Fold Break Station Login
               </h1>
               <p className="text-xs sm:text-sm text-indigo-200 leading-relaxed">
-                Select your login role below (Manager or Supervisor) and enter your password to access the Live Dashboard and Employee Kiosk controls.
+                Select your login role below (Manager, Supervisor, or Display Kiosk-Only) and enter your password to continue.
               </p>
 
-              {/* 2 Role Cards (Manager Login & Supervisor Login) */}
-              <div className="space-y-3 pt-2">
+              {/* 3 Role Cards (Manager, Supervisor & Display) */}
+              <div className="space-y-2.5 pt-1">
                 <p className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-300">
                   Select Login Role:
                 </p>
-                <div className="grid grid-cols-1 gap-3">
+                <div className="grid grid-cols-1 gap-2.5">
                   {accounts.map((acc) => {
                     const isSelected = selectedAccountId === acc.id;
                     const isManager = acc.role === 'Manager';
+                    const isDisplay = acc.role === 'Display';
                     return (
                       <button
                         key={acc.id}
                         type="button"
                         onClick={() => handleSelectAccountCard(acc)}
-                        className={`w-full text-left px-4 py-4 rounded-2xl border-2 transition flex items-center justify-between cursor-pointer ${
+                        className={`w-full text-left px-4 py-3.5 rounded-2xl border-2 transition flex items-center justify-between cursor-pointer ${
                           isSelected
                             ? 'bg-white text-[#171262] border-cyan-300 shadow-lg'
                             : 'bg-[#1C1466]/90 hover:bg-[#1C1466] text-white border-white/15'
@@ -172,18 +173,26 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
                               isSelected
                                 ? isManager
                                   ? 'bg-amber-400 text-slate-950'
+                                  : isDisplay
+                                  ? 'bg-emerald-600 text-white'
                                   : 'bg-[#4D3FDC] text-white'
                                 : isManager
                                 ? 'bg-amber-400/20 text-amber-300 border border-amber-300/30'
+                                : isDisplay
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
                                 : 'bg-white/10 text-indigo-200'
                             }`}
                           >
-                            {isManager ? 'MGR' : 'SUP'}
+                            {isManager ? 'MGR' : isDisplay ? 'KIOSK' : 'SUP'}
                           </div>
                           <div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-black text-sm sm:text-base">
-                                {isManager ? 'Manager Login' : 'Supervisor Login'}
+                                {isManager
+                                  ? 'Manager Login'
+                                  : isDisplay
+                                  ? 'Display Login (Kiosk Only)'
+                                  : 'Supervisor Login'}
                               </span>
                             </div>
                             <p
@@ -192,8 +201,10 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
                               }`}
                             >
                               {isManager
-                                ? 'Department Manager Access (1 Manager)'
-                                : 'Shared Shift Supervisor Access (All 4 Supervisors)'}
+                                ? 'Full Dashboard, Kiosk, Reports & Password Access'
+                                : isDisplay
+                                ? 'Employee Kiosk Only (Dashboard & Reports Prohibited)'
+                                : 'Shared Shift Supervisor Access (Dashboard, Kiosk & Reports)'}
                             </p>
                             <p
                               className={`text-[11px] font-mono mt-0.5 ${
@@ -231,9 +242,11 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
           {/* Right Column: Login Credentials Form */}
           <div className="lg:col-span-6 p-6 sm:p-8 flex flex-col justify-center space-y-6 bg-white">
             <div className="space-y-1">
-              <h2 className="text-xl font-black text-[#171262]">Sign In to Dashboard</h2>
+              <h2 className="text-xl font-black text-[#171262]">
+                {selectedAccountId === 'acc_display' ? 'Sign In to Employee Kiosk' : 'Sign In to Portal'}
+              </h2>
               <p className="text-xs text-[#5C5A85]">
-                Enter your Manager or Supervisor login credentials to continue
+                Enter your Manager, Supervisor, or Display login credentials to continue
               </p>
             </div>
 
@@ -252,7 +265,7 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
                       setUsernameInput(e.target.value);
                       if (loginError) setLoginError('');
                     }}
-                    placeholder="manager or supervisor"
+                    placeholder="Manager, Supervisor, or Display"
                     className="w-full bg-[#F8F9FE] border-2 border-[#E4E7F2] rounded-xl pl-10 pr-4 py-2.5 text-sm font-bold text-[#171262] focus:border-[#4D3FDC] focus:ring-2 focus:ring-[#4D3FDC]/20 focus:outline-none"
                   />
                 </div>
@@ -300,7 +313,11 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
                 className="w-full bg-[#4D3FDC] hover:bg-[#3B2EC9] text-white font-black py-3 px-5 rounded-xl text-sm shadow-md transition flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <LogIn className="w-4 h-4" />
-                <span>Sign In to Dashboard</span>
+                <span>
+                  {selectedAccountId === 'acc_display' || usernameInput.trim().toLowerCase() === 'display'
+                    ? 'Sign In to Employee Kiosk'
+                    : 'Sign In to Dashboard'}
+                </span>
               </button>
             </form>
 
@@ -651,10 +668,11 @@ export function AccountPasswordManagerCard({
         </div>
       )}
 
-      {/* 2 Role Accounts Cards */}
+      {/* 3 Role Accounts Cards */}
       <div className="space-y-3 pt-1">
         {accounts.map((acc) => {
           const isManager = acc.role === 'Manager';
+          const isDisplay = acc.role === 'Display';
           const isRestrictedForSupervisor = isManager && !isCurrentUserManager;
           const isEditing = !isRestrictedForSupervisor && editingAccountId === acc.id;
           const isShowingPw = !isRestrictedForSupervisor && Boolean(visiblePasswords[acc.id]);
@@ -676,24 +694,32 @@ export function AccountPasswordManagerCard({
                     className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-xs shrink-0 ${
                       isManager
                         ? 'bg-amber-400 text-slate-950'
+                        : isDisplay
+                        ? 'bg-emerald-600 text-white'
                         : 'bg-[#251B7C] text-white'
                     }`}
                   >
-                    {isManager ? 'MGR' : 'SUP'}
+                    {isManager ? 'MGR' : isDisplay ? 'DSP' : 'SUP'}
                   </div>
                   <div>
                     <div className="flex items-center flex-wrap gap-2">
                       <span className="font-black text-sm text-[#171262]">
-                        {isManager ? 'Manager Login' : 'Supervisor Login'}
+                        {isManager
+                          ? 'Manager Login'
+                          : isDisplay
+                          ? 'Display Login (Kiosk Only)'
+                          : 'Supervisor Login'}
                       </span>
                       <span
                         className={`px-2 py-0.5 text-[10px] font-extrabold uppercase rounded-md ${
                           isManager
                             ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                            : isDisplay
+                            ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
                             : 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9]'
                         }`}
                       >
-                        {isManager ? '1 Manager' : 'All 4 Supervisors'}
+                        {isManager ? '1 Manager' : isDisplay ? 'Kiosk Only' : 'All 4 Supervisors'}
                       </span>
                       {isRestrictedForSupervisor && (
                         <span className="px-2 py-0.5 text-[10px] font-bold uppercase rounded-md bg-rose-100 text-rose-800 border border-rose-200 inline-flex items-center gap-1">

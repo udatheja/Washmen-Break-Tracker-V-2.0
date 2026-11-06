@@ -799,7 +799,7 @@ const PIN_STORAGE_KEY = 'washmen_kiosk_supervisor_pin_v1';
 export const MAIN_STORAGE_KEY = 'washmen_break_tracker_v5';
 export const KIOSK_LOCK_STORAGE_KEY = 'washmen_kiosk_locked_v1';
 export const KIOSK_SETTINGS_STORAGE_KEY = 'washmen_kiosk_settings_v2';
-export const AUTH_ACCOUNTS_STORAGE_KEY = 'washmen_auth_accounts_v1';
+export const AUTH_ACCOUNTS_STORAGE_KEY = 'washmen_auth_accounts_v2';
 export const AUTH_SESSION_STORAGE_KEY = 'washmen_auth_active_session_v1';
 export const ACTIVE_TAB_STORAGE_KEY = 'washmen_active_tab_v1';
 const IDB_DB_NAME = 'WashmenAndroidLocalDB';
@@ -1514,12 +1514,12 @@ export async function downloadSelfContainedHtml(
 }
 
 // ============================================================================
-// 1 MANAGER & 4 SUPERVISORS LOGIN ACCOUNTS (WEB, GITHUB PAGES & ANDROID LOCAL)
+// 3 LOGIN ACCOUNTS: MANAGER, SUPERVISOR, AND DISPLAY (KIOSK-ONLY)
 // ============================================================================
 
 export interface AuthAccount {
   id: string;
-  role: 'Manager' | 'Supervisor';
+  role: 'Manager' | 'Supervisor' | 'Display';
   slotLabel: string;
   name: string;
   username: string;
@@ -1535,22 +1535,34 @@ export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
     role: 'Manager',
     slotLabel: 'Manager Login',
     name: 'Manager',
-    username: 'manager',
+    username: 'Manager',
     empId: 'MGR',
-    password: 'Manager@123',
-    defaultPassword: 'Manager@123',
+    password: 'Venki@123',
+    defaultPassword: 'Venki@123',
   },
   {
     id: 'acc_supervisor',
     role: 'Supervisor',
     slotLabel: 'Supervisor Login (4 Supervisors)',
     name: 'Supervisor',
-    username: 'supervisor',
+    username: 'Supervisor',
     empId: 'SUP',
-    password: 'Supervisor@123',
-    defaultPassword: 'Supervisor@123',
+    password: 'Washmen@123',
+    defaultPassword: 'Washmen@123',
+  },
+  {
+    id: 'acc_display',
+    role: 'Display',
+    slotLabel: 'Display Login (Kiosk Only)',
+    name: 'Display',
+    username: 'Display',
+    empId: 'DSP',
+    password: 'Pass@123',
+    defaultPassword: 'Pass@123',
   },
 ];
+
+const LEGACY_DEFAULT_PASSWORDS = new Set(['Manager@123', 'Supervisor@123', 'Admin@123']);
 
 export function normalizeAuthAccounts(raw: unknown): AuthAccount[] {
   if (!Array.isArray(raw)) return DEFAULT_AUTH_ACCOUNTS.map((a) => ({ ...a }));
@@ -1563,11 +1575,17 @@ export function normalizeAuthAccounts(raw: unknown): AuthAccount[] {
   return DEFAULT_AUTH_ACCOUNTS.map((def) => {
     const saved = mapById.get(def.id);
     if (!saved) return { ...def };
+    const rawUsername = String(saved.username || def.username).trim();
+    const normalizedUsername =
+      rawUsername.toLowerCase() === def.username.toLowerCase() ? def.username : rawUsername || def.username;
+    const rawPass = String(saved.password || '').trim();
+    const normalizedPass =
+      !rawPass || LEGACY_DEFAULT_PASSWORDS.has(rawPass) ? def.defaultPassword : rawPass;
     return {
       ...def,
-      username: String(saved.username || def.username).trim() || def.username,
-      password: String(saved.password || def.password).trim() || def.password,
-      updatedAt: Number(saved.updatedAt || 0) || undefined,
+      username: normalizedUsername,
+      password: normalizedPass,
+      updatedAt: LEGACY_DEFAULT_PASSWORDS.has(rawPass) ? undefined : Number(saved.updatedAt || 0) || undefined,
     };
   });
 }
@@ -1671,18 +1689,18 @@ export function authenticateLoginAccount(
   const cleanPass = String(passwordInput || '').trim();
   if (!cleanId || !cleanPass) return null;
 
-  for (const acc of accounts) {
+  const normAccounts = normalizeAuthAccounts(accounts);
+  for (const acc of normAccounts) {
     const matchesIdentifier =
       acc.id.toLowerCase() === cleanId ||
       acc.username.toLowerCase() === cleanId ||
       acc.role.toLowerCase() === cleanId ||
       acc.empId.toLowerCase() === cleanId ||
       (acc.role === 'Manager' && (cleanId === 'admin' || cleanId === 'manager' || cleanId === 'mgr')) ||
-      (acc.role === 'Supervisor' && (cleanId === 'supervisor' || cleanId === 'sup' || cleanId === 'supervisors'));
+      (acc.role === 'Supervisor' && (cleanId === 'supervisor' || cleanId === 'sup' || cleanId === 'supervisors')) ||
+      (acc.role === 'Display' && (cleanId === 'display' || cleanId === 'dsp' || cleanId === 'kiosk'));
 
-    const isDefaultPw = acc.password === acc.defaultPassword;
-    const matchesPassword =
-      acc.password === cleanPass || (isDefaultPw && cleanPass === 'Admin@123');
+    const matchesPassword = acc.password === cleanPass;
 
     if (matchesIdentifier && matchesPassword) {
       return acc;
@@ -1697,12 +1715,15 @@ export function isValidSupervisorOrManagerPassword(
 ): boolean {
   const cleanPass = String(passwordInput || '').trim();
   if (!cleanPass) return false;
-  if (cleanPass === 'Admin@123') return true;
-  return accounts.some((acc) => acc.password === cleanPass);
+  const normAccounts = normalizeAuthAccounts(accounts);
+  return normAccounts.some(
+    (acc) => (acc.role === 'Manager' || acc.role === 'Supervisor') && acc.password === cleanPass
+  );
 }
 
 /**
  * Calls server-side verifyPin(pin) in Google Apps Script, with local fallback for preview & local Android tablet.
+ * Only Manager or Supervisor passwords (or custom Supervisor PIN) are valid for Supervisor authorization.
  */
 export function verifyPinOnServer(pin: string): Promise<{ valid: boolean; isDefaultPin: boolean }> {
   return new Promise((resolve) => {

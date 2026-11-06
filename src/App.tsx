@@ -815,14 +815,20 @@ export default function App() {
         const localSettingsUpdated = Number(stateRef.current.kioskSettings?.updatedAt || 0);
         applyCloudSnapshotToLocal(cloudData);
 
-        // If this browser had a newer password or settings than the cloud document, push the merged result to Firestore
+        // If this browser had a newer password/settings or cloud was missing the 3rd Display account / had legacy default passwords, push merged result to Firestore
         const hasLocalNewerPassword = localAccounts.some((lAcc) => {
           const cAcc = (cloudData.authAccounts || []).find((c) => c.id === lAcc.id);
           return Number(lAcc.updatedAt || 0) > Number(cAcc?.updatedAt || 0);
         });
+        const cloudNeedsAccountUpgrade =
+          !Array.isArray(cloudData.authAccounts) ||
+          cloudData.authAccounts.length < 3 ||
+          cloudData.authAccounts.some(
+            (c) => c.password === 'Manager@123' || c.password === 'Supervisor@123'
+          );
         const hasLocalNewerSettings =
           localSettingsUpdated > Number(cloudData.kioskSettings?.updatedAt || 0);
-        if (hasLocalNewerPassword || hasLocalNewerSettings) {
+        if (hasLocalNewerPassword || cloudNeedsAccountUpgrade || hasLocalNewerSettings) {
           void pushCloudStationSync({
             authAccounts: stateRef.current.authAccounts,
             staff: stateRef.current.staff,
@@ -1878,7 +1884,7 @@ export default function App() {
     });
   }, [activeBreaks, currentTime, kioskSettings.needsReviewRunningMins]);
 
-  // ================= LOGIN GATE (1 MANAGER & 4 SUPERVISORS MUST LOG IN BEFORE ENTERING DASHBOARD) =================
+  // ================= LOGIN GATE (MANAGER, SUPERVISOR & DISPLAY KIOSK LOGIN) =================
   if (!loggedInAccount) {
     return (
       <>
@@ -1888,11 +1894,19 @@ export default function App() {
           onLoginSuccess={(acc) => {
             saveStoredAuthSession(acc);
             setLoggedInAccount(acc);
-            setIsKioskLocked(false);
-            setCurrentTab('dashboard');
-            setSettingsPinUnlocked(true);
-            serverSync();
-            showToast(`Signed in as ${acc.role}`, 'success');
+            if (acc.role === 'Display') {
+              setIsKioskLocked(true);
+              setCurrentTab('kiosk');
+              setSettingsPinUnlocked(false);
+              serverSync();
+              showToast('Signed in as Display (Employee Kiosk Only)', 'success');
+            } else {
+              setIsKioskLocked(false);
+              setCurrentTab('dashboard');
+              setSettingsPinUnlocked(true);
+              serverSync();
+              showToast(`Signed in as ${acc.role}`, 'success');
+            }
           }}
         />
         {toast && (
@@ -1917,8 +1931,8 @@ export default function App() {
     );
   }
 
-  // ================= FROZEN KIOSK MODE (When on Kiosk tab or locked tablet — hides all Supervisor headers/tabs/footers) =================
-  if (isKioskLocked || currentTab === 'kiosk') {
+  // ================= FROZEN KIOSK MODE (Always enforced for Display login, or when on Kiosk tab / locked tablet) =================
+  if (loggedInAccount.role === 'Display' || isKioskLocked || currentTab === 'kiosk') {
     return (
       <div
         onContextMenu={(e) => e.preventDefault()}
@@ -1932,21 +1946,47 @@ export default function App() {
           isKioskLocked={true}
           isDefaultPin={isDefaultPin}
           isOffline={isOffline}
+          loggedInRole={loggedInAccount.role}
+          onLogout={() => {
+            clearStoredAuthSession();
+            setLoggedInAccount(null);
+            setIsKioskLocked(false);
+            setSettingsPinUnlocked(false);
+            showToast('Logged out successfully', 'info');
+          }}
           onEnterLockedKiosk={() => setIsKioskLocked(true)}
           onExitLockedKiosk={() => {
+            if (loggedInAccount.role === 'Display') {
+              showToast(
+                'Access Prohibited: Display login is restricted to Employee Kiosk only.',
+                'danger'
+              );
+              return;
+            }
             setIsKioskLocked(false);
             setCurrentTab('dashboard');
           }}
           onOpenSupervisorSettings={() => {
+            if (loggedInAccount.role === 'Display') {
+              showToast(
+                'Access Prohibited: Display login cannot open Settings or Reports.',
+                'danger'
+              );
+              return;
+            }
             setIsKioskLocked(false);
             setSettingsPinUnlocked(true);
             setCurrentTab('settings');
           }}
-          onUpdateKioskSettings={(next: KioskSettings) => {
-            setKioskSettings(next);
-            serverSync({ kioskSettings: next });
-            saveKioskSettingsOnServer(next, verifiedSupervisorPin);
-          }}
+          onUpdateKioskSettings={
+            loggedInAccount.role === 'Display'
+              ? undefined
+              : (next: KioskSettings) => {
+                  setKioskSettings(next);
+                  serverSync({ kioskSettings: next });
+                  saveKioskSettingsOnServer(next, verifiedSupervisorPin);
+                }
+          }
           onStartBreak={(staffMember, breakType, allottedMins, breakSlot) =>
             startBreakForStaff(staffMember, breakType, allottedMins, 'kiosk', breakSlot)
           }
@@ -1955,6 +1995,24 @@ export default function App() {
           onFlagLogForReview={handleFlagLogForReview}
           showToast={showToast}
         />
+        {toast && (
+          <div className="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none">
+            <div
+              className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl text-xs font-bold text-white flex items-center space-x-2.5 ${
+                toast.type === 'success'
+                  ? 'bg-emerald-600'
+                  : toast.type === 'danger'
+                  ? 'bg-rose-600'
+                  : toast.type === 'warning'
+                  ? 'bg-amber-600'
+                  : 'bg-[#251B7C]'
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{toast.message}</span>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

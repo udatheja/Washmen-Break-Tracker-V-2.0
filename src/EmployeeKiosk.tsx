@@ -17,7 +17,9 @@ import {
   Flag,
   Check,
   Info,
-  X
+  X,
+  Maximize2,
+  LogOut
 } from 'lucide-react';
 import {
   KioskSettings,
@@ -81,6 +83,8 @@ interface EmployeeKioskProps {
   onVoidBreakFromKiosk: (activeBreak: SyncableActiveBreak) => void;
   onFlagLogForReview: (logId: string, reason: string) => void;
   showToast: (message: string, type?: 'success' | 'danger' | 'warning' | 'info') => void;
+  loggedInRole?: 'Manager' | 'Supervisor' | 'Display';
+  onLogout?: () => void;
 }
 
 type KioskScreen =
@@ -124,7 +128,11 @@ export default function EmployeeKiosk({
   onVoidBreakFromKiosk,
   onFlagLogForReview,
   showToast,
+  loggedInRole,
+  onLogout,
 }: EmployeeKioskProps) {
+  const isDisplayOnlyUser = loggedInRole === 'Display';
+  const [prohibitedNotice, setProhibitedNotice] = useState<string>('');
   // Live Dubai Clock & Automatic Shift Detection (using configured shiftTimings)
   const [now, setNow] = useState<Date>(new Date());
   const dubaiInfo = useMemo(() => getDubaiTimeInfo(now, kioskSettings), [now, kioskSettings]);
@@ -702,8 +710,8 @@ export default function EmployeeKiosk({
             </div>
           </div>
 
-          {/* Right: Live Clock (Dubai time) & Small Lock Icon for Supervisor */}
-          <div className="flex items-center gap-3">
+          {/* Right: Live Clock (Dubai time), Full Screen Button & Lock Icon */}
+          <div className="flex items-center gap-2.5 sm:gap-3">
             <div className="min-h-[64px] bg-[#1C1466] px-4 py-2 rounded-2xl border border-white/20 flex flex-col justify-center text-right pointer-events-none">
               <span className="text-sm text-indigo-100 font-bold leading-tight">{dubaiInfo.displayDate}</span>
               <span className="text-xl sm:text-2xl font-black font-mono text-cyan-300 leading-tight">
@@ -714,13 +722,27 @@ export default function EmployeeKiosk({
             <button
               type="button"
               onClick={() => {
+                toggleAndroidFullscreen();
+              }}
+              aria-label="Full Screen"
+              title="Toggle Full Screen Mode"
+              className="min-h-[64px] px-3.5 sm:px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-400/40 flex items-center justify-center gap-2 font-black text-sm sm:text-base cursor-pointer transition motion-reduce:transition-none shadow-sm"
+            >
+              <Maximize2 className="w-5 h-5 shrink-0" />
+              <span className="hidden md:inline">Full Screen</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
                 setExitPinInput('');
                 setExitPinError('');
+                setProhibitedNotice('');
                 setSupervisorPinUnlocked(false);
                 setSupervisorModalOpen(true);
               }}
               aria-label="Supervisor"
-              title="Supervisor"
+              title="Supervisor / Kiosk Menu"
               className="min-h-[64px] min-w-[64px] rounded-2xl bg-[#1C1466] hover:bg-[#17105C] text-indigo-100 hover:text-white border border-white/20 flex items-center justify-center cursor-pointer transition motion-reduce:transition-none"
             >
               <Lock className="w-6 h-6" />
@@ -1369,7 +1391,7 @@ export default function EmployeeKiosk({
         )}
       </div>
 
-      {/* ================= MODAL: CANCEL BREAK BY MISTAKE (SUPERVISOR PASSWORD REQUIRED, NO HINTS) ================= */}
+      {/* ================= MODAL: CANCEL BREAK BY MISTAKE (DIRECT KIOSK ACTION) ================= */}
       {cancelBreakModal && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -1378,8 +1400,8 @@ export default function EmployeeKiosk({
           <div className="bg-white text-[#171262] rounded-3xl max-w-md w-full p-6 border-2 border-rose-500 shadow-2xl space-y-5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <Lock className="w-6 h-6 text-rose-600" />
-                <h3 className="text-xl font-black text-[#171262]">Supervisor Approval Required</h3>
+                <RotateCcw className="w-6 h-6 text-rose-600" />
+                <h3 className="text-xl font-black text-[#171262]">Cancel Break</h3>
               </div>
               <button
                 type="button"
@@ -1394,62 +1416,47 @@ export default function EmployeeKiosk({
               </button>
             </div>
 
-            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-left space-y-1">
-              <p className="text-base font-black text-rose-950">
-                Cancel break for {cancelBreakModal.staffName}?
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-left space-y-1.5">
+              <p className="text-lg font-black text-rose-950">
+                Cancel running break for {cancelBreakModal.staffName}?
               </p>
               <p className="text-sm font-bold text-rose-800">
-                Please ask your supervisor to check and enter the supervisor password to cancel and reset this break.
+                Confirm below if this break was started by mistake. The break slot will be reset so it can be taken later.
               </p>
             </div>
 
-            <form onSubmit={handleVerifyCancelBreakPin} className="space-y-4" autoComplete="off">
-              <label className="block text-base font-extrabold text-[#171262]">
-                Supervisor Password:
-              </label>
-              <input
-                type="password"
-                inputMode="numeric"
-                autoComplete="new-password"
-                required
-                autoFocus
-                value={cancelPinInput}
-                onChange={(e) => {
-                  setCancelPinInput(e.target.value);
-                  if (cancelPinError) setCancelPinError('');
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setCancelBreakModal(null);
+                  setCancelPinInput('');
+                  setCancelPinError('');
                 }}
-                className="w-full min-h-[64px] px-4 py-3 rounded-2xl bg-[#F8F9FE] border-2 border-[#C7C2F5] text-center text-2xl font-mono font-black tracking-widest focus:outline-none focus:ring-2 focus:ring-rose-500"
-              />
-              {cancelPinError && (
-                <p className="text-base font-extrabold text-red-600 text-center">{cancelPinError}</p>
-              )}
-
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCancelBreakModal(null);
-                    setCancelPinInput('');
-                    setCancelPinError('');
-                  }}
-                  className="min-h-[64px] rounded-2xl border-2 border-slate-300 font-extrabold text-lg cursor-pointer"
-                >
-                  Back
-                </button>
-                <button
-                  type="submit"
-                  disabled={verifyingCancelPin}
-                  className="min-h-[64px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-lg cursor-pointer"
-                >
-                  {verifyingCancelPin ? 'Checking...' : 'Cancel Break'}
-                </button>
-              </div>
-            </form>
+                className="min-h-[64px] rounded-2xl border-2 border-slate-300 font-extrabold text-lg cursor-pointer"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetBreak = cancelBreakModal;
+                  setCancelBreakModal(null);
+                  setCancelPinInput('');
+                  setCancelPinError('');
+                  onVoidBreakFromKiosk(targetBreak);
+                  goHome();
+                }}
+                className="min-h-[64px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-lg cursor-pointer"
+              >
+                Cancel Break
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* ================= MODAL: SUPERVISOR PIN (FOR SHIFT SWITCH, SHIFT TIMINGS, SETTINGS, OR LEAVING KIOSK) ================= */}
+      {/* ================= MODAL: SUPERVISOR PIN / DISPLAY KIOSK MENU ================= */}
       {supervisorModalOpen && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -1459,7 +1466,9 @@ export default function EmployeeKiosk({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <Unlock className="w-6 h-6 text-[#4D3FDC]" />
-                <h3 className="text-xl font-black">Supervisor</h3>
+                <h3 className="text-xl font-black">
+                  {isDisplayOnlyUser ? 'Kiosk Display Options' : 'Supervisor'}
+                </h3>
               </div>
               <button
                 type="button"
@@ -1470,20 +1479,120 @@ export default function EmployeeKiosk({
               </button>
             </div>
 
-            {!supervisorPinUnlocked ? (
+            {isDisplayOnlyUser ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 text-amber-950 space-y-1">
+                  <p className="text-sm font-black uppercase tracking-wider text-amber-900">
+                    Signed in as: Display (Kiosk-Only Account)
+                  </p>
+                  <p className="text-xs font-bold text-amber-800 leading-relaxed">
+                    Display login has full access to Employee Kiosk actions (select names, start break, stop break, cancel break, shift view, and full screen). Access to Supervisor Dashboard, Settings, Daily Report, and Monthly Report tabs is prohibited.
+                  </p>
+                </div>
+
+                {prohibitedNotice && (
+                  <div className="p-4 rounded-2xl bg-rose-50 border-2 border-rose-500 text-rose-900 flex items-start gap-2.5">
+                    <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                    <span className="text-xs sm:text-sm font-black leading-snug">{prohibitedNotice}</span>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <p className="text-base font-black text-[#171262]">View Shift Names on Kiosk:</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['Auto', 'Morning', 'Night'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setSupervisorShiftOverride(mode)}
+                        className={`min-h-[56px] rounded-2xl font-black text-sm sm:text-base border-2 cursor-pointer ${
+                          supervisorShiftOverride === mode
+                            ? 'bg-[#4D3FDC] text-white border-[#4D3FDC]'
+                            : 'bg-[#F8F9FE] text-[#171262] border-[#C7C2F5]'
+                        }`}
+                      >
+                        {mode === 'Auto' ? `Auto (${dubaiInfo.autoShift})` : mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    toggleAndroidFullscreen();
+                  }}
+                  className="w-full min-h-[56px] rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-base flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Maximize2 className="w-5 h-5" />
+                  <span>Full Screen Mode</span>
+                </button>
+
+                {/* Prohibited Navigation Buttons for Display User */}
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <p className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+                    Supervisor &amp; Manager Restricted Tabs (Prohibited for Display):
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      'Supervisor Dashboard',
+                      'Settings',
+                      'Daily Report',
+                      'Monthly Report',
+                    ].map((tabLabel) => (
+                      <button
+                        key={tabLabel}
+                        type="button"
+                        onClick={() => {
+                          const msg = `Access Prohibited: "Display" user is restricted to Employee Kiosk only and cannot open ${tabLabel}.`;
+                          setProhibitedNotice(msg);
+                          showToast(msg, 'danger');
+                        }}
+                        className="py-3 px-3 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-800 border border-slate-300 hover:border-rose-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                        <span>{tabLabel}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {onLogout && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSupervisorModalOpen(false);
+                      onLogout();
+                    }}
+                    className="w-full min-h-[56px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-base flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <LogOut className="w-5 h-5" />
+                    <span>Logout (Switch Account)</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setSupervisorModalOpen(false)}
+                  className="w-full min-h-[56px] rounded-2xl border-2 border-slate-300 font-extrabold text-base cursor-pointer"
+                >
+                  Back to Kiosk
+                </button>
+              </div>
+            ) : !supervisorPinUnlocked ? (
               <form onSubmit={handleVerifySupervisorPin} className="space-y-4" autoComplete="off">
                 <p className="text-base text-[#4A4870] font-bold">
-                  Enter Supervisor Password:
+                  Enter Supervisor or Manager Password:
                 </p>
                 <input
                   type="password"
-                  inputMode="numeric"
                   autoComplete="new-password"
                   required
                   autoFocus
                   value={exitPinInput}
                   onChange={(e) => setExitPinInput(e.target.value)}
-                  className="w-full min-h-[64px] px-4 py-3 rounded-2xl bg-[#F8F9FE] border-2 border-[#C7C2F5] text-center text-2xl font-mono font-black tracking-widest focus:outline-none focus:ring-2 focus:ring-[#4D3FDC]"
+                  placeholder="Enter password..."
+                  className="w-full min-h-[64px] px-4 py-3 rounded-2xl bg-[#F8F9FE] border-2 border-[#C7C2F5] text-center text-xl font-mono font-black tracking-wider focus:outline-none focus:ring-2 focus:ring-[#4D3FDC]"
                 />
                 {exitPinError && (
                   <p className="text-base font-extrabold text-red-600 text-center">{exitPinError}</p>
@@ -1644,6 +1753,20 @@ export default function EmployeeKiosk({
                 >
                   Open Supervisor Dashboard
                 </button>
+
+                {onLogout && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSupervisorModalOpen(false);
+                      onLogout();
+                    }}
+                    className="w-full min-h-[56px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-base flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <LogOut className="w-5 h-5" />
+                    <span>Logout</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
