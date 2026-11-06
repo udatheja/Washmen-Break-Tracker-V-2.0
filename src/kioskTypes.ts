@@ -1486,21 +1486,6 @@ export async function downloadSelfContainedHtml(
   customFilename: string = 'index.html'
 ): Promise<void> {
   const filename = customFilename || 'index.html';
-  if (!isLocalFileProtocol()) {
-    try {
-      const res = await fetch('./washmen-break-tracker.html', { cache: 'no-store' });
-      if (res.ok) {
-        const htmlText = await res.text();
-        if (htmlText && htmlText.includes('<html')) {
-          const withState = injectEmbeddedStateIntoHtml(htmlText);
-          await downloadOrShareFile(filename, withState, 'text/html;charset=utf-8', preferShare);
-          return;
-        }
-      }
-    } catch {
-      // Fall through to live DOM snapshot
-    }
-  }
 
   // Build a clean snapshot from the current document with an empty #root so React mounts cleanly on open
   const clone = document.documentElement.cloneNode(true) as HTMLElement;
