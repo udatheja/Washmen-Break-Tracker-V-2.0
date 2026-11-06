@@ -3,6 +3,7 @@ import { getAuth } from 'firebase/auth';
 import {
   getFirestore,
   doc,
+  getDoc,
   getDocFromServer,
   onSnapshot,
   setDoc,
@@ -15,6 +16,8 @@ import {
   SyncableActiveBreak,
   SyncableBreakLog,
   KioskSettings,
+  mergeState,
+  mergeAuthAccounts,
 } from './kioskTypes';
 
 function resolveFirebaseConfig(raw: typeof firebaseConfig) {
@@ -150,21 +153,106 @@ export function buildBoundedStationPayload(
   };
 }
 
+/**
+ * Reads the latest station state directly from the Firestore server (with cache fallback).
+ */
+export async function pullCloudStationSync(): Promise<CloudStationSyncPayload | null> {
+  const path = `${STATION_SYNC_COLLECTION}/${STATION_SYNC_DOC_ID}`;
+  const docRef = doc(db, STATION_SYNC_COLLECTION, STATION_SYNC_DOC_ID);
+  try {
+    let snap;
+    try {
+      snap = await getDocFromServer(docRef);
+    } catch {
+      snap = await getDoc(docRef);
+    }
+    if (!snap.exists()) return null;
+    return snap.data() as CloudStationSyncPayload;
+  } catch (error) {
+    try {
+      handleFirestoreError(error, OperationType.GET, path);
+    } catch {
+      // Allow local mode when offline
+    }
+    return null;
+  }
+}
+
+/**
+ * Safely merges the incoming local mutation with the current Firestore server document
+ * before writing, so no device can ever accidentally overwrite active breaks, logs,
+ * or passwords created on another device.
+ */
 export async function pushCloudStationSync(
   payload: Omit<CloudStationSyncPayload, 'stationId' | 'syncToken' | 'updatedAtMs'> & {
     updatedAtMs?: number;
   }
-): Promise<void> {
+): Promise<CloudStationSyncPayload | null> {
   const path = `${STATION_SYNC_COLLECTION}/${STATION_SYNC_DOC_ID}`;
-  const bounded = buildBoundedStationPayload(payload);
+  const docRef = doc(db, STATION_SYNC_COLLECTION, STATION_SYNC_DOC_ID);
   try {
-    await setDoc(doc(db, STATION_SYNC_COLLECTION, STATION_SYNC_DOC_ID), bounded);
+    let existingCloud: CloudStationSyncPayload | null = null;
+    try {
+      const snap = await getDocFromServer(docRef);
+      if (snap.exists()) {
+        existingCloud = snap.data() as CloudStationSyncPayload;
+      }
+    } catch {
+      try {
+        const fallbackSnap = await getDoc(docRef);
+        if (fallbackSnap.exists()) {
+          existingCloud = fallbackSnap.data() as CloudStationSyncPayload;
+        }
+      } catch {}
+    }
+
+    let finalPayload = payload;
+    if (existingCloud) {
+      const mergedState = mergeState(
+        {
+          staff: existingCloud.staff,
+          activeBreaks: existingCloud.activeBreaks,
+          logs: existingCloud.logs,
+          deletedLogs: existingCloud.deletedLogs,
+          deletedStaff: existingCloud.deletedStaff,
+          closedBreakIds: existingCloud.closedBreakIds,
+          kioskSettings: existingCloud.kioskSettings,
+        },
+        {
+          staff: payload.staff,
+          activeBreaks: payload.activeBreaks,
+          logs: payload.logs,
+          deletedLogs: payload.deletedLogs,
+          deletedStaff: payload.deletedStaff,
+          closedBreakIds: payload.closedBreakIds,
+          kioskSettings: payload.kioskSettings,
+        }
+      );
+      const mergedAccounts = mergeAuthAccounts(existingCloud.authAccounts, payload.authAccounts);
+      finalPayload = {
+        authAccounts: mergedAccounts,
+        staff: mergedState.staff,
+        activeBreaks: mergedState.activeBreaks,
+        logs: mergedState.logs,
+        deletedLogs: mergedState.deletedLogs,
+        deletedStaff: mergedState.deletedStaff || [],
+        closedBreakIds: mergedState.closedBreakIds || [],
+        kioskSettings: mergedState.kioskSettings,
+        updatedByRole: payload.updatedByRole,
+        updatedAtMs: Date.now(),
+      };
+    }
+
+    const bounded = buildBoundedStationPayload(finalPayload);
+    await setDoc(docRef, bounded);
+    return bounded;
   } catch (error) {
     try {
       handleFirestoreError(error, OperationType.WRITE, path);
     } catch {
       // Allow local offline fallback to continue uninterrupted
     }
+    return null;
   }
 }
 
@@ -175,6 +263,7 @@ export function subscribeToCloudStationSync(
   const path = `${STATION_SYNC_COLLECTION}/${STATION_SYNC_DOC_ID}`;
   return onSnapshot(
     doc(db, STATION_SYNC_COLLECTION, STATION_SYNC_DOC_ID),
+    { includeMetadataChanges: true },
     (snapshot) => {
       onSyncStatus?.(true);
       if (!snapshot.exists()) {

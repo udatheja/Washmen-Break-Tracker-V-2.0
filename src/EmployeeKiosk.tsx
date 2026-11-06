@@ -433,12 +433,12 @@ export default function EmployeeKiosk({
     });
   }, [activeBreaks, getElapsedSecs, getSavedOrConfiguredMins]);
 
-  // All staff for current shift, sorted alphabetically
+  // All staff for current shift (plus any staff currently on an active break), sorted alphabetically
   const shiftStaff = useMemo(() => {
     return staff
-      .filter((s) => s.active && s.shift === selectedShift)
+      .filter((s) => s.active && (s.shift === selectedShift || activeBreaks.some((b) => b.staffId === s.id)))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [staff, selectedShift]);
+  }, [staff, selectedShift, activeBreaks]);
 
   // Filtered staff by search box
   const visibleStaff = useMemo(() => {
