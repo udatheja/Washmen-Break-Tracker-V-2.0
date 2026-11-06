@@ -16,6 +16,8 @@ The system provides a centralized dashboard for managing employee break schedule
 
 Developed with a focus on real-world laundry operations, the application transforms manual break monitoring into a structured, digital, and data-driven workflow.
 
+[![Architecture diagram of udatheja/washmen-break-tracker-v-2.0](https://gitdiagram.com/udatheja/washmen-break-tracker-v-2.0/diagram.png)](https://gitdiagram.com/udatheja/washmen-break-tracker-v-2.0?utm_source=readme&utm_medium=picture)
+
 ✨ Key Features
 
 ⏱️ 1. Real-Time Break Tracking
@@ -259,6 +261,8 @@ Do not redistribute or deploy it as an official company product without the nece
   <sub>💡 Think Different • Build Smart • Keep Creating</sub>
 
 </div>
+
+[![Architecture diagram](https://gitdiagram.com/diagram-badge.svg)](https://gitdiagram.com/udatheja/washmen-break-tracker-v-2.0?utm_source=readme&utm_medium=badge)
 
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 
