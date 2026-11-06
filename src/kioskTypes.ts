@@ -786,6 +786,8 @@ export const MAIN_STORAGE_KEY = 'washmen_break_tracker_v5';
 export const KIOSK_LOCK_STORAGE_KEY = 'washmen_kiosk_locked_v1';
 export const KIOSK_SETTINGS_STORAGE_KEY = 'washmen_kiosk_settings_v2';
 export const AUTH_ACCOUNTS_STORAGE_KEY = 'washmen_auth_accounts_v1';
+export const AUTH_SESSION_STORAGE_KEY = 'washmen_auth_active_session_v1';
+export const ACTIVE_TAB_STORAGE_KEY = 'washmen_active_tab_v1';
 const IDB_DB_NAME = 'WashmenAndroidLocalDB';
 const IDB_STORE_NAME = 'kv_store';
 const memoryStorageFallback = new Map<string, string>();
@@ -901,6 +903,7 @@ export function isPersistentBrowserStorageBlocked(): boolean {
 
 function updateLiveEmbeddedStateDom(key: string, value: string): void {
   try {
+    if (key === AUTH_SESSION_STORAGE_KEY || key === ACTIVE_TAB_STORAGE_KEY) return;
     if (typeof document === 'undefined' || !document.body) return;
     let holder = document.getElementById('washmen-embedded-state') as HTMLScriptElement | null;
     let current: Record<string, string> = {};
@@ -932,6 +935,8 @@ function writeUrlHashKey(key: string, value: string): void {
       key !== KIOSK_LOCK_STORAGE_KEY &&
       key !== PIN_STORAGE_KEY &&
       key !== AUTH_ACCOUNTS_STORAGE_KEY &&
+      key !== AUTH_SESSION_STORAGE_KEY &&
+      key !== ACTIVE_TAB_STORAGE_KEY &&
       key !== MAIN_STORAGE_KEY &&
       key !== 'washmen_break_tracker_v2'
     ) {
@@ -1589,6 +1594,55 @@ export function saveStoredAuthAccounts(accounts: AuthAccount[]): AuthAccount[] {
   const normalized = normalizeAuthAccounts(accounts);
   safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(normalized));
   return normalized;
+}
+
+export function getStoredAuthSession(accountsList?: AuthAccount[]): AuthAccount | null {
+  try {
+    const raw = safeGetStorage(AUTH_SESSION_STORAGE_KEY);
+    if (!raw || raw === 'null' || raw === '') return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || parsed.loggedOut === true || !parsed.id) return null;
+    const accounts = accountsList && accountsList.length > 0 ? accountsList : getStoredAuthAccounts();
+    const matched = accounts.find(
+      (a) =>
+        a.id === parsed.id ||
+        a.role.toLowerCase() === String(parsed.role || '').toLowerCase() ||
+        a.username.toLowerCase() === String(parsed.username || '').toLowerCase()
+    );
+    return matched || null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredAuthSession(account: AuthAccount): void {
+  try {
+    const now = Date.now();
+    safeSetStorage(
+      AUTH_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        id: account.id,
+        role: account.role,
+        username: account.username,
+        loggedOut: false,
+        loggedInAt: now,
+        updatedAt: now,
+      })
+    );
+  } catch {}
+}
+
+export function clearStoredAuthSession(): void {
+  try {
+    safeSetStorage(
+      AUTH_SESSION_STORAGE_KEY,
+      JSON.stringify({
+        id: '',
+        loggedOut: true,
+        updatedAt: Date.now(),
+      })
+    );
+  } catch {}
 }
 
 export function authenticateLoginAccount(

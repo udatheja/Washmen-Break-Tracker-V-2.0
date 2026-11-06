@@ -45,8 +45,13 @@ import {
   DEFAULT_KIOSK_SETTINGS,
   AuthAccount,
   AUTH_ACCOUNTS_STORAGE_KEY,
+  AUTH_SESSION_STORAGE_KEY,
+  ACTIVE_TAB_STORAGE_KEY,
   getStoredAuthAccounts,
   saveStoredAuthAccounts,
+  getStoredAuthSession,
+  saveStoredAuthSession,
+  clearStoredAuthSession,
   normalizeAuthAccounts,
   isValidSupervisorOrManagerPassword,
   mergeState,
@@ -203,9 +208,26 @@ export default function App() {
   // Navigation & Shift (auto-detect Morning/Night from Asia/Dubai time)
   const [currentShift, setCurrentShift] = useState<'Morning' | 'Night'>(() => getDubaiTimeInfo(new Date()).autoShift);
   const [isKioskLocked, setIsKioskLockedState] = useState<boolean>(() => detectInitialKioskMode());
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'kiosk' | 'roster' | 'logs' | 'report' | 'settings'>(() =>
-    detectInitialKioskMode() ? 'kiosk' : 'dashboard'
-  );
+  const [currentTab, setCurrentTabState] = useState<'dashboard' | 'kiosk' | 'roster' | 'logs' | 'report' | 'settings'>(() => {
+    if (detectInitialKioskMode()) return 'kiosk';
+    const savedTab = safeGetStorage(ACTIVE_TAB_STORAGE_KEY);
+    if (
+      savedTab === 'dashboard' ||
+      savedTab === 'kiosk' ||
+      savedTab === 'roster' ||
+      savedTab === 'logs' ||
+      savedTab === 'report' ||
+      savedTab === 'settings'
+    ) {
+      return savedTab;
+    }
+    return 'dashboard';
+  });
+
+  const setCurrentTab = useCallback((tab: 'dashboard' | 'kiosk' | 'roster' | 'logs' | 'report' | 'settings') => {
+    setCurrentTabState(tab);
+    safeSetStorage(ACTIVE_TAB_STORAGE_KEY, tab);
+  }, []);
 
   const setIsKioskLocked = useCallback((locked: boolean) => {
     setIsKioskLockedState(locked);
@@ -250,9 +272,11 @@ export default function App() {
   // Restore Default Roster In-Page Confirmation Modal (replaces confirm())
   const [restoreRosterModalOpen, setRestoreRosterModalOpen] = useState<boolean>(false);
 
-  // 1 Manager & 4 Supervisors Login Accounts + Active Session State
+  // 1 Manager & 4 Supervisors Login Accounts + Active Session State (persists across page refresh until Logout button clicked)
   const [authAccounts, setAuthAccounts] = useState<AuthAccount[]>(() => getStoredAuthAccounts());
-  const [loggedInAccount, setLoggedInAccount] = useState<AuthAccount | null>(null);
+  const [loggedInAccount, setLoggedInAccount] = useState<AuthAccount | null>(() =>
+    getStoredAuthSession(getStoredAuthAccounts())
+  );
   const [logDeleteWarning, setLogDeleteWarning] = useState<string>('');
 
   const handleUpdateAuthAccounts = useCallback(
@@ -261,14 +285,19 @@ export default function App() {
       setAuthAccounts(normalized);
       if (loggedInAccount) {
         const updatedCurrent = normalized.find((a) => a.id === loggedInAccount.id);
-        if (updatedCurrent) setLoggedInAccount(updatedCurrent);
+        if (updatedCurrent) {
+          setLoggedInAccount(updatedCurrent);
+          saveStoredAuthSession(updatedCurrent);
+        }
       }
     },
     [loggedInAccount]
   );
 
   // Settings Tab Server PIN Protection
-  const [settingsPinUnlocked, setSettingsPinUnlocked] = useState<boolean>(false);
+  const [settingsPinUnlocked, setSettingsPinUnlocked] = useState<boolean>(() =>
+    Boolean(getStoredAuthSession(getStoredAuthAccounts()))
+  );
   const [verifiedSupervisorPin, setVerifiedSupervisorPin] = useState<string>('0000');
   const [settingsPinInput, setSettingsPinInput] = useState<string>('');
   const [settingsPinError, setSettingsPinError] = useState<string>('');
@@ -506,14 +535,40 @@ export default function App() {
     };
 
     loadStorageWithIdbFallback(AUTH_ACCOUNTS_STORAGE_KEY).then((idbAuthRaw) => {
+      let latestAccounts = getStoredAuthAccounts();
       if (idbAuthRaw) {
         try {
           const parsedAcc = JSON.parse(idbAuthRaw);
           if (Array.isArray(parsedAcc)) {
-            setAuthAccounts(normalizeAuthAccounts(parsedAcc));
+            latestAccounts = normalizeAuthAccounts(parsedAcc);
+            setAuthAccounts(latestAccounts);
           }
         } catch {}
       }
+      loadStorageWithIdbFallback(AUTH_SESSION_STORAGE_KEY).then((idbSessionRaw) => {
+        if (idbSessionRaw && idbSessionRaw !== 'null' && idbSessionRaw !== '') {
+          try {
+            const parsedSession = JSON.parse(idbSessionRaw);
+            if (
+              parsedSession &&
+              typeof parsedSession === 'object' &&
+              parsedSession.loggedOut !== true &&
+              parsedSession.id
+            ) {
+              const matched = latestAccounts.find(
+                (a) =>
+                  a.id === parsedSession.id ||
+                  a.role.toLowerCase() === String(parsedSession.role || '').toLowerCase() ||
+                  a.username.toLowerCase() === String(parsedSession.username || '').toLowerCase()
+              );
+              if (matched) {
+                setLoggedInAccount(matched);
+                setSettingsPinUnlocked(true);
+              }
+            }
+          } catch {}
+        }
+      });
     });
 
     const saved = safeGetStorage(STORAGE_KEY) || safeGetStorage('washmen_break_tracker_v2');
@@ -1596,6 +1651,7 @@ export default function App() {
           accounts={authAccounts}
           currentTime={currentTime}
           onLoginSuccess={(acc) => {
+            saveStoredAuthSession(acc);
             setLoggedInAccount(acc);
             setIsKioskLocked(false);
             setCurrentTab('dashboard');
@@ -1784,6 +1840,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
+                  clearStoredAuthSession();
                   setLoggedInAccount(null);
                   setSettingsPinUnlocked(false);
                   showToast('Logged out successfully', 'info');
