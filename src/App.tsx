@@ -70,7 +70,14 @@ import {
   getShiftBreakSlots,
   getEffectiveBreakMins,
   getShiftTotalBreakMins,
-  calculateMonthlyEntitledMins,
+  getShiftDailyAllowanceMins,
+  getCountedMins,
+  getCurrentShiftDate,
+  getDailyBalance,
+  calculateEmployeeMonthlyReport,
+  pruneLogsOlderThanSixMonths,
+  getSixMonthCutoffDateStr,
+  getLastSixMonthsOptions,
   saveKioskSettingsOnServer,
   resolveBreakSlot,
   safeGetStorage,
@@ -184,6 +191,7 @@ export interface BreakLog {
   exceptionReason: string;
   notes?: string;
   date: string; // YYYY-MM-DD
+  countedMins?: number;
   source?: 'kiosk' | 'supervisor';
   voided?: boolean;
   needsReview?: boolean;
@@ -375,6 +383,13 @@ export default function App() {
   const [logTypeFilter, setLogTypeFilter] = useState<string>('All');
   const [logSearch, setLogSearch] = useState<string>('');
 
+  // Dashboard Balance Filter & Supervisor Fix Log Modal
+  const [dashboardBalanceFilter, setDashboardBalanceFilter] = useState<'all' | 'overAllowance' | 'lowBalance'>('all');
+  const [fixLogModal, setFixLogModal] = useState<BreakLog | null>(null);
+  const [fixLogReason, setFixLogReason] = useState<string>('Normal');
+  const [fixLogCustomMinsStr, setFixLogCustomMinsStr] = useState<string>('');
+  const [fixLogNotes, setFixLogNotes] = useState<string>('');
+
   // Monthly Report Filters
   const [reportMonth, setReportMonth] = useState<string>(() => getDubaiTimeInfo(new Date()).dateStr.slice(0, 7));
   const [reportShiftFilter, setReportShiftFilter] = useState<string>('All');
@@ -488,9 +503,13 @@ export default function App() {
         ? (cloudData.activeBreaks as ActiveBreak[]).filter((b) => !closedBreakSet.has(b.id))
         : stateRef.current.activeBreaks;
 
-      const nextLogs = Array.isArray(cloudData.logs)
+      const rawLogs = Array.isArray(cloudData.logs)
         ? (cloudData.logs as BreakLog[]).filter((l) => !delLogSet.has(l.id))
         : stateRef.current.logs;
+      const { retainedLogs: nextLogs, expiredLogIds } = pruneLogsOlderThanSixMonths(rawLogs);
+      for (const expId of expiredLogIds) {
+        delLogSet.add(expId);
+      }
 
       const nextSettings: KioskSettings = cloudData.kioskSettings
         ? { ...DEFAULT_KIOSK_SETTINGS, ...cloudData.kioskSettings }
@@ -566,12 +585,14 @@ export default function App() {
           );
           const nextAccounts = normalizeAuthAccounts(payload.authAccounts);
           const nextSettings = { ...DEFAULT_KIOSK_SETTINGS, ...payload.kioskSettings };
+          const { retainedLogs: prunedLogs, expiredLogIds } = pruneLogsOlderThanSixMonths(payload.logs || []);
+          const nextDeletedLogs = Array.from(new Set([...(payload.deletedLogs || []), ...expiredLogIds]));
 
           stateRef.current = {
             staff: nextStaffCleaned,
             activeBreaks: payload.activeBreaks || [],
-            logs: payload.logs || [],
-            deletedLogs: payload.deletedLogs || [],
+            logs: prunedLogs,
+            deletedLogs: nextDeletedLogs,
             deletedStaff: payload.deletedStaff || [],
             closedBreakIds: payload.closedBreakIds || [],
             kioskSettings: nextSettings,
@@ -670,10 +691,12 @@ export default function App() {
             (s) => !EXCLUDED_EMP_IDS.includes(String(s.empId)) && !delStaffSet.has(s.id)
           );
           if (cleanedStaff.length > 0) {
+            const { retainedLogs, expiredLogIds } = pruneLogsOlderThanSixMonths(parsed.logs || []);
+            const mergedDelLogs = Array.from(new Set([...(parsed.deletedLogs || []), ...expiredLogIds]));
             setStaff(cleanedStaff);
             setActiveBreaks(parsed.activeBreaks || []);
-            setLogs(parsed.logs || []);
-            setDeletedLogs(parsed.deletedLogs || []);
+            setLogs(retainedLogs);
+            setDeletedLogs(mergedDelLogs);
             setDeletedStaff(Array.from(delStaffSet));
             setClosedBreakIds(parsed.closedBreakIds || []);
             let bestSettings = parsed.kioskSettings
@@ -1182,9 +1205,14 @@ export default function App() {
     ): BreakLog => {
       const now = new Date();
       const nowIso = now.toISOString();
-      const dubaiDate = getDubaiTimeInfo(now).dateStr;
+      const shiftDate = getCurrentShiftDate(brk.shift, now, kioskSettings);
       const allotted = resolveAllottedMins(brk);
-      const variance = options.voided ? 0 : options.durationMins - allotted;
+      const counted = options.voided
+        ? 0
+        : options.exceptionReason === 'Supervisor Forgot' || options.exceptionReason === 'I forgot to stop earlier'
+        ? allotted
+        : options.durationMins;
+      const variance = options.voided ? 0 : counted - allotted;
       const resolvedSlot = brk.breakSlot || resolveBreakSlot(brk.breakType, undefined, kioskSettings) || undefined;
       const isTestBreak = Boolean(brk.testMode || kioskSettings.testMode);
 
@@ -1199,11 +1227,12 @@ export default function App() {
         startTime: brk.startTime,
         endTime: nowIso,
         durationMins: options.voided ? 0 : options.durationMins,
+        countedMins: counted,
         allottedMins: allotted,
         varianceMins: variance,
         exceptionReason: options.exceptionReason,
         notes: options.notes,
-        date: dubaiDate,
+        date: shiftDate,
         source: options.source,
         voided: Boolean(options.voided),
         needsReview: Boolean(options.needsReview),
@@ -1294,41 +1323,110 @@ export default function App() {
     [completeAndSaveBreak, resolveAllottedMins, kioskSettings.graceMins, kioskSettings.bigOvertimeMins]
   );
 
-  // Void Break within 60 seconds ("Started by mistake? Cancel")
+  // Cancel Break ("Started by mistake? Cancel" with unlock code "0000") — does NOT create any report log so employee can take the break later
   const handleVoidBreakFromKiosk = useCallback(
     (brk: ActiveBreak) => {
-      completeAndSaveBreak(brk, {
-        durationMins: 0,
-        exceptionReason: 'Voided (Started by mistake <60s)',
-        notes: 'Cancelled by employee within 60 seconds of start',
-        source: 'kiosk',
-        voided: true,
-        needsReview: false,
+      const nextActive = activeBreaks.filter((b) => b.id !== brk.id && b.staffId !== brk.staffId);
+      const nextLogs = logs.filter((l) => l.activeBreakId !== brk.id);
+      const nextClosed = Array.from(new Set([...closedBreakIds, brk.id]));
+
+      setActiveBreaks(nextActive);
+      setLogs(nextLogs);
+      setClosedBreakIds(nextClosed);
+      serverSync({
+        activeBreaks: nextActive,
+        logs: nextLogs,
+        closedBreakIds: nextClosed,
       });
-      showToast(`Cancelled ${brk.breakType} break for ${brk.staffName} (Voided)`, 'info');
+      showToast(
+        `Cancelled ${brk.breakType} break for ${brk.staffName} (Not recorded on report; break can be taken later)`,
+        'info'
+      );
     },
-    [completeAndSaveBreak, showToast]
+    [activeBreaks, logs, closedBreakIds, serverSync, showToast]
   );
 
   // Flag an already-completed break log for supervisor review from Kiosk Result screen
   const handleFlagLogForReview = useCallback(
     (logId: string, reason: string) => {
-      const nextLogs = logs.map((l) =>
-        l.id === logId
-          ? {
-              ...l,
-              needsReview: true,
-              exceptionReason: reason,
-              notes: l.notes ? `${l.notes} • Employee flagged: ${reason}` : `Employee flagged: ${reason}`,
-            }
-          : l
-      );
+      const nextLogs = logs.map((l) => {
+        if (l.id !== logId) return l;
+        const allotted = resolveAllottedMins(l);
+        const counted =
+          reason === 'I forgot to stop earlier' || reason === 'Supervisor Forgot'
+            ? allotted
+            : getCountedMins(l, kioskSettings);
+        return {
+          ...l,
+          needsReview: true,
+          exceptionReason: reason,
+          countedMins: counted,
+          varianceMins: counted - allotted,
+          notes: l.notes ? `${l.notes} • Employee flagged: ${reason}` : `Employee flagged: ${reason}`,
+        };
+      });
       setLogs(nextLogs);
       serverSync({ logs: nextLogs });
       showToast('Flagged for supervisor review', 'info');
     },
-    [logs, serverSync, showToast]
+    [logs, kioskSettings, resolveAllottedMins, serverSync, showToast]
   );
+
+  // Open Supervisor Fix / Void Log Modal
+  const openFixLogModal = useCallback(
+    (log: BreakLog) => {
+      setFixLogModal(log);
+      setFixLogReason(log.voided ? 'Voided' : log.exceptionReason || 'Normal');
+      setFixLogCustomMinsStr(String(getCountedMins(log, kioskSettings) || log.durationMins || log.allottedMins));
+      setFixLogNotes(log.notes || '');
+    },
+    [kioskSettings]
+  );
+
+  // Save Supervisor Fix / Void on an existing log (immediately updates counted minutes, balance, and daily overtime)
+  const handleSaveFixedLog = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fixLogModal) return;
+
+    const isVoid = fixLogReason === 'Voided';
+    const allotted = resolveAllottedMins(fixLogModal);
+    const parsedCustom = parseInt(fixLogCustomMinsStr, 10);
+    let nextCounted = fixLogModal.durationMins;
+
+    if (isVoid) {
+      nextCounted = 0;
+    } else if (fixLogReason === 'Supervisor Forgot' || fixLogReason === 'I forgot to stop earlier') {
+      nextCounted = !isNaN(parsedCustom) && parsedCustom >= 0 ? parsedCustom : allotted;
+    } else if (['Interrupted Early', 'Manual Override', 'Approved Extended'].includes(fixLogReason)) {
+      nextCounted = !isNaN(parsedCustom) && parsedCustom >= 0 ? parsedCustom : fixLogModal.durationMins;
+    } else {
+      nextCounted = !isNaN(parsedCustom) && parsedCustom >= 0 ? parsedCustom : fixLogModal.durationMins;
+    }
+
+    const nextLogs = logs.map((l) => {
+      if (l.id !== fixLogModal.id) return l;
+      return {
+        ...l,
+        voided: isVoid,
+        needsReview: false,
+        exceptionReason: isVoid ? 'Voided by Supervisor (Minutes returned to balance)' : fixLogReason,
+        countedMins: nextCounted,
+        durationMins: isVoid ? 0 : nextCounted,
+        varianceMins: isVoid ? 0 : nextCounted - allotted,
+        notes: fixLogNotes.trim() || l.notes,
+      };
+    });
+
+    setLogs(nextLogs);
+    serverSync({ logs: nextLogs });
+    setFixLogModal(null);
+    showToast(
+      isVoid
+        ? `Voided ${fixLogModal.breakType} break for ${fixLogModal.staffName} — minutes returned to daily balance`
+        : `Updated ${fixLogModal.breakType} break for ${fixLogModal.staffName} (${nextCounted}m counted)`,
+      'success'
+    );
+  };
 
   // Add/Edit Staff Handler
   const handleSaveStaff = (e: React.FormEvent) => {
@@ -1613,48 +1711,35 @@ export default function App() {
       showToast('No logs recorded yet to export', 'warning');
       return;
     }
-    let csv = 'Log ID,Employee ID,Date,Shift,Employee Name,Break Type,Start Time,End Time,Actual Duration (Mins),Allotted (Mins),Variance (Mins),Supervisor Exception,Notes,Source,Voided,Needs Review,Test Mode,Deleted,Deleted At,Deleted By\n';
+    let csv = 'Log ID,Employee ID,Date,Shift,Employee Name,Break Type,Start Time,End Time,Actual Duration (Mins),Counted (Mins),Allotted (Mins),Over Break Time (Mins),Supervisor Exception,Notes,Source,Voided,Needs Review,Test Mode,Deleted,Deleted At,Deleted By\n';
     logs.forEach((l) => {
       const allotted = resolveAllottedMins(l);
-      csv += `${l.id},${l.empId || ''},${l.date},${l.shift},"${l.staffName}",${l.breakType},${new Date(l.startTime).toLocaleTimeString()},${new Date(l.endTime).toLocaleTimeString()},${l.durationMins},${allotted},${l.varianceMins},"${l.exceptionReason}","${l.notes || ''}",${l.source || 'supervisor'},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)},${Boolean(l.deleted)},"${l.deletedAt ? `${l.deletedAt} (${l.deletedDate || l.date})` : ''}","${l.deletedBy || ''}"\n`;
+      const counted = getCountedMins(l, kioskSettings);
+      const overThisBreak = Math.max(0, counted - allotted);
+      csv += `${l.id},${l.empId || ''},${l.date},${l.shift},"${l.staffName}",${l.breakType},${new Date(l.startTime).toLocaleTimeString()},${new Date(l.endTime).toLocaleTimeString()},${l.durationMins},${counted},${allotted},${overThisBreak},"${l.exceptionReason}","${l.notes || ''}",${l.source || 'supervisor'},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)},${Boolean(l.deleted)},"${l.deletedAt ? `${l.deletedAt} (${l.deletedDate || l.date})` : ''}","${l.deletedBy || ''}"\n`;
     });
     await downloadOrShareFile(`Washmen_Break_Logs_${todayStr}.csv`, csv, 'text/csv;charset=utf-8;', false);
     showToast('Exported Daily Break Logs CSV', 'success');
   };
 
-  // Export Monthly Report to CSV (excludes voided and testMode breaks, uses per-log allottedMins + current setting for untaken breaks)
+  // Export Monthly Report to CSV (uses daily allowance rule: Entitled = days present x allowance, Used, Difference, Overtime = sum of daily overtime, Days over allowance, Saved minutes)
   const exportMonthlyReportToCSV = async () => {
-    const logsInMonth = validLogs.filter((l) => l.date.startsWith(reportMonth));
-    let csv = 'Month,Employee ID,Employee Name,Shift,Department,Breaks Taken,Monthly Entitled (Hours & Mins),Monthly Entitled (Mins),Total Consumed (Hours & Mins),Total Consumed (Mins),Net Variance,Status,Critical Warning\n';
+    let csv = 'Month,Employee ID,Employee Name,Shift,Department,Days Present,Breaks Taken,Daily Allowance (Mins),Entitled (Mins),Entitled (Hours & Mins),Used (Mins),Used (Hours & Mins),Difference (Entitled - Used Mins),Overtime (Daily Rule Mins),Overtime (Hours & Mins),Days Over Allowance,Saved Minutes,Status\n';
     staff.forEach((st) => {
-      const userLogs = logsInMonth.filter((l) => l.staffId === st.id);
-      const count = userLogs.length;
-      const consumedMins = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
-      const entitledMins = calculateMonthlyEntitledMins(st.shift, userLogs, kioskSettings, 26);
-      const criticalMins = entitledMins + 240; // 4 hours above monthly entitled allowance
-      const netVarianceMins = consumedMins - entitledMins;
-      const isOverCritical = consumedMins > criticalMins;
-      const isOverEntitled = consumedMins > entitledMins;
-      const entitledFormatted = `${Math.floor(entitledMins / 60)}h ${String(entitledMins % 60).padStart(2, '0')}m`;
-      const statusStr = isOverCritical
-        ? 'CRITICAL EXCEEDED'
-        : isOverEntitled
-        ? 'Overtime'
-        : consumedMins === entitledMins
-        ? 'Exact Target'
-        : 'Compliant';
-      const warningStr = isOverCritical
-        ? `YES (+${Math.floor((consumedMins - criticalMins) / 60)}h ${(consumedMins - criticalMins) % 60}m over critical limit)`
-        : 'NO';
-      const consumedFormatted = `${Math.floor(consumedMins / 60)}h ${consumedMins % 60}m`;
-      const netFormatted =
-        netVarianceMins > 0
-          ? `+${Math.floor(netVarianceMins / 60)}h ${netVarianceMins % 60}m`
-          : netVarianceMins < 0
-          ? `-${Math.floor(Math.abs(netVarianceMins) / 60)}h ${Math.abs(netVarianceMins) % 60}m`
-          : '0h 00m';
+      const summary = calculateEmployeeMonthlyReport(st.id, st.shift, reportMonth, validLogs, kioskSettings);
+      const entitledFormatted = `${Math.floor(summary.entitledMins / 60)}h ${String(summary.entitledMins % 60).padStart(2, '0')}m`;
+      const usedFormatted = `${Math.floor(summary.usedMins / 60)}h ${String(summary.usedMins % 60).padStart(2, '0')}m`;
+      const overtimeFormatted = `${Math.floor(summary.overtimeMins / 60)}h ${String(summary.overtimeMins % 60).padStart(2, '0')}m`;
+      const statusStr =
+        summary.overtimeMins > 240
+          ? 'CRITICAL EXCEEDED'
+          : summary.overtimeMins > 0
+          ? 'Overtime'
+          : summary.daysPresent === 0
+          ? 'No Logs'
+          : 'Within Allowance';
 
-      csv += `${reportMonth},${st.empId},"${st.name}",${st.shift},${st.department},${count},"${entitledFormatted}",${entitledMins},"${consumedFormatted}",${consumedMins},"${netFormatted}","${statusStr}","${warningStr}"\n`;
+      csv += `${reportMonth},${st.empId},"${st.name}",${st.shift},${st.department},${summary.daysPresent},${summary.breaksCount},${summary.dailyAllowanceMins},${summary.entitledMins},"${entitledFormatted}",${summary.usedMins},"${usedFormatted}",${summary.differenceMins},${summary.overtimeMins},"${overtimeFormatted}",${summary.daysOverAllowance},${summary.savedMins},"${statusStr}"\n`;
     });
     await downloadOrShareFile(
       `Washmen_Monthly_Summary_${reportMonth}.csv`,
@@ -1843,34 +1928,57 @@ export default function App() {
     return [...list].sort((a, b) => a.name.localeCompare(b.name));
   }, [staff, reportShiftFilter]);
 
-  // Baseline monthly entitled minutes for the active filter (26 working shifts * shift daily total)
+  // Baseline monthly entitled minutes for the active filter (daily allowance per shift)
   const defaultShiftForHeader: 'Morning' | 'Night' =
     reportShiftFilter === 'Night' ? 'Night' : reportShiftFilter === 'Morning' ? 'Morning' : currentShift;
-  const baselineShiftDailyMins = getShiftTotalBreakMins(kioskSettings, defaultShiftForHeader);
+  const baselineShiftDailyMins = getShiftDailyAllowanceMins(kioskSettings, defaultShiftForHeader);
   const baselineMonthlyEntitledMins = 26 * baselineShiftDailyMins;
+
+  const monthlySummariesByStaffId = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof calculateEmployeeMonthlyReport>>();
+    monthlyReportStaff.forEach((st) => {
+      map.set(st.id, calculateEmployeeMonthlyReport(st.id, st.shift, reportMonth, validLogs, kioskSettings));
+    });
+    return map;
+  }, [monthlyReportStaff, reportMonth, validLogs, kioskSettings]);
 
   const totalMonthlyAllottedMins = useMemo(() => {
     return monthlyReportStaff.reduce((sum, st) => {
-      const userLogs = monthlyLogs.filter((l) => l.staffId === st.id);
-      return sum + calculateMonthlyEntitledMins(st.shift, userLogs, kioskSettings, 26);
+      const s = monthlySummariesByStaffId.get(st.id);
+      return sum + (s ? s.entitledMins : 0);
     }, 0);
-  }, [monthlyReportStaff, monthlyLogs, kioskSettings]);
+  }, [monthlyReportStaff, monthlySummariesByStaffId]);
 
-  const totalMonthlyUsed = monthlyLogs.reduce((acc, l) => acc + l.durationMins, 0);
+  const totalMonthlyUsed = useMemo(() => {
+    return monthlyReportStaff.reduce((sum, st) => {
+      const s = monthlySummariesByStaffId.get(st.id);
+      return sum + (s ? s.usedMins : 0);
+    }, 0);
+  }, [monthlyReportStaff, monthlySummariesByStaffId]);
 
-  // Counts of employees exceeding their entitled monthly allowance and critical threshold (+4h above entitled)
+  const totalMonthlyOvertime = useMemo(() => {
+    return monthlyReportStaff.reduce((sum, st) => {
+      const s = monthlySummariesByStaffId.get(st.id);
+      return sum + (s ? s.overtimeMins : 0);
+    }, 0);
+  }, [monthlyReportStaff, monthlySummariesByStaffId]);
+
+  const totalMonthlySavedMins = useMemo(() => {
+    return monthlyReportStaff.reduce((sum, st) => {
+      const s = monthlySummariesByStaffId.get(st.id);
+      return sum + (s ? s.savedMins : 0);
+    }, 0);
+  }, [monthlyReportStaff, monthlySummariesByStaffId]);
+
+  // Counts of employees with daily overtime in the month and critical threshold (>240m overtime)
   const staffOver26Count = monthlyReportStaff.filter((st) => {
-    const userLogs = monthlyLogs.filter((l) => l.staffId === st.id);
-    const userUsed = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
-    const entitled = calculateMonthlyEntitledMins(st.shift, userLogs, kioskSettings, 26);
-    return userUsed > entitled;
+    const s = monthlySummariesByStaffId.get(st.id);
+    return (s?.overtimeMins || 0) > 0;
   }).length;
 
   const staffOver30Count = monthlyReportStaff.filter((st) => {
-    const userLogs = monthlyLogs.filter((l) => l.staffId === st.id);
-    const userUsed = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
-    const entitled = calculateMonthlyEntitledMins(st.shift, userLogs, kioskSettings, 26);
-    return userUsed > entitled + 240;
+    const s = monthlySummariesByStaffId.get(st.id);
+    return (s?.overtimeMins || 0) > 240;
   }).length;
 
   // Human-readable formatted month (e.g. November 2026) for clear visibility
@@ -2531,6 +2639,16 @@ export default function App() {
                     }
 
                     const progressPercent = Math.min(100, Math.max(0, (elapsedSeconds / Math.max(1, allottedSeconds)) * 100));
+                    const activeShiftDate = getCurrentShiftDate(brk.shift, currentTime, kioskSettings);
+                    const liveBal = getDailyBalance(
+                      brk.staffId,
+                      activeShiftDate,
+                      validLogs,
+                      brk,
+                      currentTime,
+                      kioskSettings,
+                      brk.shift
+                    );
 
                     return (
                       <div
@@ -2551,6 +2669,25 @@ export default function App() {
                               {brk.shift} Shift {brk.empId ? `• ID: #${brk.empId}` : ''} {brk.source === 'kiosk' ? '• Kiosk' : ''}
                             </span>
                             <h4 className="font-bold text-[#171262] text-sm leading-tight break-words">{brk.staffName}</h4>
+                            {kioskSettings.showLiveBalanceOnBreak !== false && (
+                              <div className="mt-1">
+                                {liveBal.liveBalanceMins < 0 ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                    <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
+                                    <span>Over by {Math.abs(liveBal.liveBalanceMins)} min</span>
+                                  </span>
+                                ) : liveBal.liveBalanceMins === 0 ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                    <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                                    <span>Balance now: none left</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9]">
+                                    <span>Balance now: {liveBal.liveBalanceMins} min left</span>
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
                           <div className="flex items-center gap-1.5 shrink-0">
                             {brk.testMode && (
@@ -2618,30 +2755,129 @@ export default function App() {
               )}
             </div>
 
-            {/* SHIFT BREAK MATRIX WITH SUPERVISOR RESET BUTTONS */}
+            {/* SHIFT BREAK MATRIX WITH DAILY SUMMARY, BALANCE TILES & FILTER CHIPS */}
             <div id="sec-matrix" className="bg-white rounded-2xl border border-[#E4E7F2] shadow-sm overflow-hidden scroll-mt-28">
               {(() => {
                 const shiftSlotConfigs = getShiftBreakSlots(kioskSettings, currentShift);
-                const shiftTotalConfiguredMins = getShiftTotalBreakMins(kioskSettings, currentShift);
+                const shiftAllowanceMins = getShiftDailyAllowanceMins(kioskSettings, currentShift);
+                const currentShiftDateStr = getCurrentShiftDate(currentShift, currentTime, kioskSettings);
+
+                const staffWithBalances = availableStaffForQuickStart.map((st) => {
+                  const activeBrk = activeBreaks.find((b) => b.staffId === st.id) || null;
+                  const bal = getDailyBalance(
+                    st.id,
+                    currentShiftDateStr,
+                    validLogs,
+                    activeBrk,
+                    currentTime,
+                    kioskSettings,
+                    st.shift
+                  );
+                  return { st, activeBreak: activeBrk, bal };
+                });
+
+                const totalShiftAllowanceMins = staffWithBalances.reduce((sum, item) => sum + item.bal.allowanceMins, 0);
+                const totalShiftUsedMins = staffWithBalances.reduce((sum, item) => sum + item.bal.usedMins, 0);
+                const totalShiftSavedMins = staffWithBalances.reduce((sum, item) => sum + item.bal.savedMins, 0);
+                const overAllowanceList = staffWithBalances.filter(
+                  (item) => item.bal.isOverAllowance || item.bal.liveBalanceMins < 0
+                );
+                const lowBalanceList = staffWithBalances.filter(
+                  (item) => item.bal.liveBalanceMins >= 0 && item.bal.liveBalanceMins < 10
+                );
+
+                const filteredMatrixStaff =
+                  dashboardBalanceFilter === 'overAllowance'
+                    ? overAllowanceList
+                    : dashboardBalanceFilter === 'lowBalance'
+                    ? lowBalanceList
+                    : staffWithBalances;
+
                 return (
                   <>
-                    <div className="p-4 sm:p-5 border-b border-[#E4E7F2] flex flex-wrap items-center justify-between gap-3 bg-[#FAFBFD]">
-                      <div>
-                        <h3 className="font-bold text-[#171262] text-base">Today's Shift Break Matrix</h3>
-                        <p className="text-xs text-[#5C5A85]">
-                          Track {shiftSlotConfigs[0].name} ({shiftSlotConfigs[0].mins}m), {shiftSlotConfigs[1].name} ({shiftSlotConfigs[1].mins}m) &amp; {shiftSlotConfigs[2].name} ({shiftSlotConfigs[2].mins}m) — {shiftTotalConfiguredMins}m total per shift
-                        </p>
+                    <div className="p-4 sm:p-5 border-b border-[#E4E7F2] space-y-4 bg-[#FAFBFD]">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h3 className="font-bold text-[#171262] text-base">Today's Shift Break Matrix & Daily Allowance</h3>
+                          <p className="text-xs text-[#5C5A85]">
+                            Track {shiftSlotConfigs[0].name} ({shiftSlotConfigs[0].mins}m), {shiftSlotConfigs[1].name} ({shiftSlotConfigs[1].mins}m) &amp; {shiftSlotConfigs[2].name} ({shiftSlotConfigs[2].mins}m) — Daily Break Allowance: <strong className="text-[#171262]">{shiftAllowanceMins} min</strong> per person
+                          </p>
+                        </div>
+                        <div className="flex items-center space-x-3 text-xs">
+                          <span className="flex items-center text-emerald-700 font-medium">
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block mr-1.5"></span> Taken
+                          </span>
+                          <span className="flex items-center text-amber-700 font-medium">
+                            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block mr-1.5"></span> In Progress
+                          </span>
+                          <span className="flex items-center text-[#5C5A85] font-medium">
+                            <span className="w-2.5 h-2.5 rounded-full bg-slate-300 inline-block mr-1.5"></span> Pending
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center space-x-3 text-xs">
-                        <span className="flex items-center text-emerald-700 font-medium">
-                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block mr-1.5"></span> Taken
-                        </span>
-                        <span className="flex items-center text-amber-700 font-medium">
-                          <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block mr-1.5"></span> In Progress
-                        </span>
-                        <span className="flex items-center text-[#5C5A85] font-medium">
-                          <span className="w-2.5 h-2.5 rounded-full bg-slate-300 inline-block mr-1.5"></span> Pending
-                        </span>
+
+                      {/* Daily Summary per Shift (Total Allowance, Total Used, Total Saved, People Over Allowance) */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="bg-white p-3 rounded-xl border border-[#E4E7F2] shadow-2xs">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-[#5C5A85]">Total Shift Allowance</p>
+                          <p className="text-lg font-black text-[#171262] mt-0.5">{totalShiftAllowanceMins} min</p>
+                          <p className="text-[11px] text-[#5C5A85]">{availableStaffForQuickStart.length} staff × {shiftAllowanceMins}m</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-xl border border-[#E4E7F2] shadow-2xs">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-[#5C5A85]">Total Used Today</p>
+                          <p className="text-lg font-black text-[#4D3FDC] mt-0.5">{totalShiftUsedMins} min</p>
+                          <p className="text-[11px] text-[#5C5A85]">Counted break minutes</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-xl border border-emerald-200 bg-emerald-50/30 shadow-2xs">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-800">Total Saved Today</p>
+                          <p className="text-lg font-black text-emerald-700 mt-0.5">{totalShiftSavedMins} min</p>
+                          <p className="text-[11px] text-emerald-700">Allowance minus used (&lt;{shiftAllowanceMins}m)</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-xl border border-amber-200 bg-amber-50/40 shadow-2xs">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-amber-900">People Over Allowance</p>
+                          <p className="text-lg font-black text-amber-800 mt-0.5">{overAllowanceList.length}</p>
+                          <p className="text-[11px] text-amber-800">Exceeded {shiftAllowanceMins}m daily allowance</p>
+                        </div>
+                      </div>
+
+                      {/* Filter Chips */}
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <span className="text-[11px] font-bold text-[#5C5A85] mr-1">Filter Staff:</span>
+                        <button
+                          type="button"
+                          onClick={() => setDashboardBalanceFilter('all')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border cursor-pointer ${
+                            dashboardBalanceFilter === 'all'
+                              ? 'bg-[#4D3FDC] text-white border-[#4D3FDC] shadow-xs'
+                              : 'bg-white text-[#171262] border-[#E4E7F2] hover:bg-slate-50'
+                          }`}
+                        >
+                          All Staff ({staffWithBalances.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDashboardBalanceFilter('overAllowance')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border flex items-center gap-1.5 cursor-pointer ${
+                            dashboardBalanceFilter === 'overAllowance'
+                              ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
+                              : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                          }`}
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          <span>Over allowance today ({overAllowanceList.length})</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDashboardBalanceFilter('lowBalance')}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition border flex items-center gap-1.5 cursor-pointer ${
+                            dashboardBalanceFilter === 'lowBalance'
+                              ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
+                              : 'bg-white text-[#171262] border-[#E4E7F2] hover:bg-slate-50'
+                          }`}
+                        >
+                          <Clock className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Low balance (under 10 min) ({lowBalanceList.length})</span>
+                        </button>
                       </div>
                     </div>
 
@@ -2650,7 +2886,7 @@ export default function App() {
                         <thead className="bg-[#F8F9FE] text-[#5C5A85] uppercase font-bold border-b border-[#E4E7F2]">
                           <tr>
                             <th className="px-3.5 py-3">Emp ID</th>
-                            <th className="px-4 py-3">Employee Name</th>
+                            <th className="px-4 py-3">Employee Name & Balance</th>
                             <th className="px-3 py-3">Shift</th>
                             <th className="px-3 py-3 text-center">
                               {shiftSlotConfigs[0].name} ({shiftSlotConfigs[0].mins}m)
@@ -2661,16 +2897,15 @@ export default function App() {
                             <th className="px-3 py-3 text-center">
                               {shiftSlotConfigs[2].name} ({shiftSlotConfigs[2].mins}m)
                             </th>
-                            <th className="px-3 py-3 text-center">Total Used</th>
+                            <th className="px-3 py-3 text-center">Used / Daily Allowance</th>
                             <th className="px-4 py-3 text-right">Actions & Reset</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-[#EAEFF8]">
-                          {availableStaffForQuickStart.map((st) => {
+                          {filteredMatrixStaff.map(({ st, activeBreak, bal }) => {
                             const staffLogs = validLogs.filter(
                               (l) => l.staffId === st.id && isLogInCurrentShiftCycle(l, currentTime, kioskSettings)
                             );
-                            const activeBreak = activeBreaks.find((b) => b.staffId === st.id);
 
                             const slot1Log = staffLogs.find(
                               (l) => resolveBreakSlot(l.breakType, l.breakSlot, kioskSettings) === 1
@@ -2681,13 +2916,6 @@ export default function App() {
                             const slot3Log = staffLogs.find(
                               (l) => resolveBreakSlot(l.breakType, l.breakSlot, kioskSettings) === 3
                             );
-
-                            const totalMins = staffLogs.reduce((acc, l) => acc + l.durationMins, 0);
-                            // Daily entitled minutes uses each taken break's saved allottedMins + current setting for untaken breaks
-                            const entitledTodayMins =
-                              (slot1Log ? resolveAllottedMins(slot1Log) : shiftSlotConfigs[0].mins) +
-                              (slot2Log ? resolveAllottedMins(slot2Log) : shiftSlotConfigs[1].mins) +
-                              (slot3Log ? resolveAllottedMins(slot3Log) : shiftSlotConfigs[2].mins);
 
                             const renderBadge = (slotNum: 1 | 2 | 3, log?: BreakLog) => {
                               if (
@@ -2701,14 +2929,27 @@ export default function App() {
                                 );
                               }
                               if (log) {
+                                const counted = getCountedMins(log, kioskSettings);
+                                const slotAllotted = resolveAllottedMins(log);
+                                const isOverSlot = counted > slotAllotted;
                                 return (
-                                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 tracking-wide">
-                                    ✓ {log.durationMins}m / {resolveAllottedMins(log)}m
+                                  <span
+                                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide ${
+                                      isOverSlot
+                                        ? 'bg-amber-50 text-amber-900 border border-amber-300'
+                                        : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    }`}
+                                  >
+                                    ✓ {counted}m / {slotAllotted}m
                                   </span>
                                 );
                               }
                               return <span className="text-slate-300 font-bold">—</span>;
                             };
+
+                            const displayBalMins = activeBreak ? bal.liveBalanceMins : bal.balanceMins;
+                            const isOverDaily = displayBalMins < 0;
+                            const isZeroDaily = displayBalMins === 0;
 
                             return (
                               <tr key={st.id} className="hover:bg-[#F9FAFE] transition">
@@ -2717,6 +2958,23 @@ export default function App() {
                                 </td>
                                 <td className="px-4 py-3.5">
                                   <span className="font-bold text-[#171262] text-sm block tracking-normal break-words">{st.name}</span>
+                                  <div className="mt-1 flex items-center gap-2">
+                                    {isOverDaily ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                        <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
+                                        <span>Over by {Math.abs(displayBalMins)} min</span>
+                                      </span>
+                                    ) : isZeroDaily ? (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                                        <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                                        <span>Balance: none left</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 text-[#171262] border border-slate-200">
+                                        <span>Balance: {displayBalMins} min</span>
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td className="px-3 py-3.5 text-[#5C5A85]">
                                   <span className={`px-2.5 py-0.5 rounded text-[11px] font-bold tracking-wide ${st.shift === 'Morning' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9]'}`}>
@@ -2726,8 +2984,15 @@ export default function App() {
                                 <td className="px-3 py-3 text-center">{renderBadge(1, slot1Log)}</td>
                                 <td className="px-3 py-3 text-center">{renderBadge(2, slot2Log)}</td>
                                 <td className="px-3 py-3 text-center">{renderBadge(3, slot3Log)}</td>
-                                <td className={`px-3 py-3 text-center font-mono font-bold ${totalMins > entitledTodayMins ? 'text-rose-600' : 'text-[#171262]'}`}>
-                                  {totalMins} / {entitledTodayMins} mins
+                                <td className="px-3 py-3 text-center">
+                                  <div className={`font-mono font-bold ${bal.isOverAllowance ? 'text-amber-800' : 'text-[#171262]'}`}>
+                                    {bal.usedMins} / {bal.allowanceMins} mins
+                                  </div>
+                                  {bal.overtimeMins > 0 && (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded mt-0.5">
+                                      +{bal.overtimeMins}m daily overtime
+                                    </span>
+                                  )}
                                 </td>
                                 <td className="px-4 py-3 text-right">
                                   <div className="flex items-center justify-end space-x-1.5">
@@ -2955,8 +3220,15 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-xl font-black text-[#171262]">Daily Break Logs & Audit Trail</h2>
-                <p className="text-xs text-[#5C5A85]">Complete record of every break taken with supervisor exception tracking (voided breaks are excluded from totals)</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-xl font-black text-[#171262]">Daily Break Logs & Audit Trail</h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    6-Month Auto-Retention Active (Cutoff: {getSixMonthCutoffDateStr(currentTime, kioskSettings)})
+                  </span>
+                </div>
+                <p className="text-xs text-[#5C5A85] mt-0.5">
+                  Saved smoothly for up to 6 months (logs older than 6 months are auto-deleted). Per-break late marks show &quot;over this break&apos;s time&quot; for information; report overtime is calculated from the daily total vs daily allowance.
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -2980,9 +3252,10 @@ export default function App() {
             {/* Filter toolbar */}
             <div className="bg-white p-4 rounded-2xl border border-[#E4E7F2] grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 shadow-xs">
               <div>
-                <label className="block text-[11px] font-semibold text-[#5C5A85] mb-1">Filter Date</label>
+                <label className="block text-[11px] font-semibold text-[#5C5A85] mb-1">Filter Date (Up to 6 Months)</label>
                 <input
                   type="date"
+                  min={getSixMonthCutoffDateStr(currentTime, kioskSettings)}
                   value={logDateFilter}
                   onChange={(e) => setLogDateFilter(e.target.value)}
                   className="w-full bg-[#F8F9FE] border border-[#E4E7F2] text-[#171262] text-xs rounded-xl px-3 py-2 focus:ring-2 focus:ring-[#4D3FDC]"
@@ -3012,6 +3285,7 @@ export default function App() {
                   <option value="Lunch">Lunch</option>
                   <option value="Tea">Tea</option>
                   <option value="Dinner">Dinner</option>
+                  <option value="Midnight meal">Midnight meal</option>
                 </select>
               </div>
               <div>
@@ -3053,19 +3327,22 @@ export default function App() {
                       <th className="px-3.5 py-3.5">Emp ID</th>
                       <th className="px-4 py-3.5">Employee Name</th>
                       <th className="px-3 py-3.5">Shift</th>
-                      <th className="px-3.5 py-3.5">Date</th>
+                      <th className="px-3.5 py-3.5">Shift Date</th>
                       <th className="px-3.5 py-3.5">Break Type</th>
                       <th className="px-3.5 py-3.5">Start - End</th>
-                      <th className="px-3.5 py-3.5 text-center">Actual Duration</th>
-                      <th className="px-3.5 py-3.5 text-center">Variance (+/-)</th>
-                      <th className="px-4 py-3.5">Supervisor Exception & Status</th>
-                      <th className="px-3 py-3.5 text-right">Delete</th>
+                      <th className="px-3.5 py-3.5 text-center">Counted Duration</th>
+                      <th className="px-3.5 py-3.5 text-center">Break Slot Status</th>
+                      <th className="px-4 py-3.5">Supervisor Fix &amp; Notes</th>
+                      <th className="px-3 py-3.5 text-right">Fix / Delete</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#EAEFF8]">
                     {filteredLogs.map((log) => {
                       const startStr = new Date(log.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                       const endStr = new Date(log.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      const counted = getCountedMins(log, kioskSettings);
+                      const slotAllotted = resolveAllottedMins(log);
+                      const slotVariance = counted - slotAllotted;
                       return (
                         <tr
                           key={log.id}
@@ -3101,11 +3378,11 @@ export default function App() {
                           <td className="px-3.5 py-3 font-mono text-[#5C5A85]">{startStr} - {endStr}</td>
                           <td className="px-3.5 py-3 text-center font-mono font-bold text-[#171262]">
                             {log.voided || log.deleted ? (
-                              <span className="line-through text-slate-400">{log.durationMins} mins</span>
+                              <span className="line-through text-slate-400">0m (Voided)</span>
                             ) : (
                               <span>
-                                {log.durationMins}m{' '}
-                                <span className="text-[10px] font-normal text-[#5C5A85]">(of {resolveAllottedMins(log)}m)</span>
+                                {counted}m{' '}
+                                <span className="text-[10px] font-normal text-[#5C5A85]">(slot {slotAllotted}m)</span>
                               </span>
                             )}
                           </td>
@@ -3116,19 +3393,19 @@ export default function App() {
                               </span>
                             ) : log.voided ? (
                               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-slate-200 text-slate-700 uppercase">
-                                VOIDED
+                                VOIDED (Returned to Balance)
                               </span>
                             ) : log.testMode ? (
                               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-100 text-amber-800 uppercase">
                                 TEST (Excluded)
                               </span>
-                            ) : log.varianceMins > 0 ? (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                                +{log.varianceMins}m late
+                            ) : slotVariance > 0 ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-900 border border-amber-300">
+                                +{slotVariance}m over this break&apos;s time
                               </span>
-                            ) : log.varianceMins < 0 ? (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                                {log.varianceMins}m early
+                            ) : slotVariance < 0 ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                                {slotVariance}m early
                               </span>
                             ) : (
                               <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -3158,51 +3435,61 @@ export default function App() {
                                 </span>
                               </div>
                             ) : (
-                              <button
-                                onClick={() => {
-                                  if (loggedInAccount?.role !== 'Manager') {
-                                    const warnMsg =
-                                      'Warning: Supervisor login cannot delete daily break logs. Only Manager login has access to delete logs.';
-                                    setLogDeleteWarning(warnMsg);
-                                    showToast(warnMsg, 'warning');
-                                    return;
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => openFixLogModal(log)}
+                                  className="px-2 py-1 rounded-lg text-[11px] font-bold bg-[#EEECFB] hover:bg-[#4D3FDC] text-[#4D3FDC] hover:text-white border border-[#D5D0F9] transition cursor-pointer"
+                                  title="Supervisor Fix Reason or Void Break (Returns minutes to balance)"
+                                >
+                                  Fix / Void
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (loggedInAccount?.role !== 'Manager') {
+                                      const warnMsg =
+                                        'Warning: Supervisor login cannot delete daily break logs. Only Manager login has access to delete logs.';
+                                      setLogDeleteWarning(warnMsg);
+                                      showToast(warnMsg, 'warning');
+                                      return;
+                                    }
+                                    setLogDeleteWarning('');
+                                    const deletedTimeStr = new Date().toLocaleTimeString([], {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      second: '2-digit',
+                                      hour12: true,
+                                    });
+                                    const deletedByUser = loggedInAccount.username || 'manager';
+                                    const nextLogs = logs.map((l) =>
+                                      l.id === log.id
+                                        ? {
+                                            ...l,
+                                            deleted: true,
+                                            deletedAt: deletedTimeStr,
+                                            deletedDate: todayStr,
+                                            deletedBy: deletedByUser,
+                                          }
+                                        : l
+                                    );
+                                    setLogs(nextLogs);
+                                    serverSync({ logs: nextLogs });
+                                    showToast(`Log deleted at ${deletedTimeStr} by ${deletedByUser}`, 'info');
+                                  }}
+                                  className={`p-1 cursor-pointer transition ${
+                                    loggedInAccount?.role === 'Manager'
+                                      ? 'text-slate-400 hover:text-rose-600'
+                                      : 'text-slate-300 hover:text-amber-600'
+                                  }`}
+                                  title={
+                                    loggedInAccount?.role === 'Manager'
+                                      ? 'Delete Log (Manager Only)'
+                                      : 'Supervisor login cannot delete logs (Manager Only)'
                                   }
-                                  setLogDeleteWarning('');
-                                  const deletedTimeStr = new Date().toLocaleTimeString([], {
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                    second: '2-digit',
-                                    hour12: true,
-                                  });
-                                  const deletedByUser = loggedInAccount.username || 'manager';
-                                  const nextLogs = logs.map((l) =>
-                                    l.id === log.id
-                                      ? {
-                                          ...l,
-                                          deleted: true,
-                                          deletedAt: deletedTimeStr,
-                                          deletedDate: todayStr,
-                                          deletedBy: deletedByUser,
-                                        }
-                                      : l
-                                  );
-                                  setLogs(nextLogs);
-                                  serverSync({ logs: nextLogs });
-                                  showToast(`Log deleted at ${deletedTimeStr} by ${deletedByUser}`, 'info');
-                                }}
-                                className={`p-1 cursor-pointer transition ${
-                                  loggedInAccount?.role === 'Manager'
-                                    ? 'text-slate-400 hover:text-rose-600'
-                                    : 'text-slate-300 hover:text-amber-600'
-                                }`}
-                                title={
-                                  loggedInAccount?.role === 'Manager'
-                                    ? 'Delete Log (Manager Only)'
-                                    : 'Supervisor login cannot delete logs (Manager Only)'
-                                }
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -3226,15 +3513,20 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-xl font-black text-[#171262]">Monthly Adherence & Variance Report</h2>
-                <p className="text-xs text-[#5C5A85]">
-                  Monthly entitled minutes use each taken break&apos;s saved allowed time and the current shift settings for breaks not taken (voided &amp; test mode breaks excluded)
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-xl font-black text-[#171262]">Monthly Adherence, Balance &amp; Daily Overtime Report</h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    6 Months Saved Smoothly • Auto-Cleanup &gt; 6 Months
+                  </span>
+                </div>
+                <p className="text-xs text-[#5C5A85] mt-0.5">
+                  Calculated live from existing logs using the daily allowance rule: Entitled = Days Present × Daily Allowance, Overtime = Sum of Daily Overtime, and Saved Minutes = Sum of Daily Unused Balance.
                 </p>
               </div>
             </div>
 
-            {/* 1. Spacious Month Selection & Filter Controls Card */}
-            <div className="bg-white p-6 rounded-2xl border border-[#E4E7F2] shadow-sm">
+            {/* 1. Spacious Month Selection & 6-Month Quick Switcher Card */}
+            <div className="bg-white p-6 rounded-2xl border border-[#E4E7F2] shadow-sm space-y-4">
               <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-5">
                 
                 {/* Left: Prominent Month Picker with Large Clear Display */}
@@ -3244,7 +3536,7 @@ export default function App() {
                   </div>
                   <div className="space-y-1 w-full sm:w-auto">
                     <label className="block text-xs font-bold text-[#5C5A85] uppercase tracking-wider">
-                      Reporting Month
+                      Reporting Month (Last 6 Months Retained)
                     </label>
                     <div className="flex items-center gap-2">
                       <input
@@ -3264,7 +3556,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Active Month Title Badge (Ensures user ALWAYS sees full month name clearly) */}
+                  {/* Active Month Title Badge */}
                   <div className="sm:border-l sm:border-[#E4E7F2] sm:pl-4 space-y-0.5">
                     <p className="text-[11px] font-medium text-[#5C5A85]">Active Period</p>
                     <p className="text-base font-black text-[#171262] tracking-wide">{formattedReportMonth}</p>
@@ -3301,50 +3593,67 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+              </div>
 
+              {/* Quick 6-Month Selector Pills */}
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#E4E7F2]">
+                <span className="text-[11px] font-bold text-[#5C5A85] mr-1">6-Month History:</span>
+                {getLastSixMonthsOptions(currentTime, kioskSettings).map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => setReportMonth(m.value)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition border cursor-pointer ${
+                      reportMonth === m.value
+                        ? 'bg-[#4D3FDC] text-white border-[#4D3FDC] shadow-xs'
+                        : 'bg-[#F8F9FE] text-[#171262] border-[#E4E7F2] hover:bg-[#EEECFB]'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
               </div>
             </div>
 
             {/* 2. Spacious Aggregates KPI Grid (4 Distinct Cards) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Staff Monitored */}
+              {/* Total Entitled (Days Present x Allowance) */}
               <div className="bg-white p-5 rounded-2xl border border-[#E4E7F2] shadow-sm flex items-center space-x-4">
                 <div className="p-3 bg-[#EEECFB] text-[#4D3FDC] rounded-xl border border-[#D5D0F9]">
-                  <Users className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-[11px] font-semibold text-[#5C5A85] uppercase tracking-wider">Staff Monitored</p>
-                  <h3 className="text-2xl font-black text-[#171262]">{monthlyReportStaff.length} Employees</h3>
-                  <p className="text-[11px] text-[#5C5A85]">{reportShiftFilter === 'All' ? 'All Shifts' : `${reportShiftFilter} Shift`}</p>
-                </div>
-              </div>
-
-              {/* Standard Allotment */}
-              <div className="bg-white p-5 rounded-2xl border border-[#E4E7F2] shadow-sm flex items-center space-x-4">
-                <div className="p-3 bg-indigo-50 text-[#4D3FDC] rounded-xl border border-indigo-200">
                   <Clock className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="text-[11px] font-semibold text-[#5C5A85] uppercase tracking-wider">Monthly Entitled</p>
-                  <h3 className="text-2xl font-black text-[#4D3FDC]">
-                    {String(Math.floor(baselineMonthlyEntitledMins / 60)).padStart(2, '0')}:
-                    {String(baselineMonthlyEntitledMins % 60).padStart(2, '0')} Hours
-                  </h3>
-                  <p className="text-[11px] text-[#5C5A85]">{baselineMonthlyEntitledMins} mins / 26 shifts ({baselineShiftDailyMins}m/shift)</p>
+                  <p className="text-[11px] font-semibold text-[#5C5A85] uppercase tracking-wider">Total Entitled</p>
+                  <h3 className="text-2xl font-black text-[#171262]">{totalMonthlyAllottedMins} min</h3>
+                  <p className="text-[11px] text-[#5C5A85]">Days present × {baselineShiftDailyMins}m daily allowance</p>
                 </div>
               </div>
 
-              {/* Total Break Exceed Staff Count */}
-              <div className={`p-5 rounded-2xl border shadow-sm flex items-center space-x-4 ${staffOver26Count > 0 ? 'bg-amber-50/70 border-amber-300' : 'bg-white border-[#E4E7F2]'}`}>
-                <div className={`p-3 rounded-xl border ${staffOver26Count > 0 ? 'bg-amber-100 text-amber-700 border-amber-300' : 'bg-emerald-50 text-emerald-600 border-emerald-200'}`}>
+              {/* Total Used & Saved */}
+              <div className="bg-white p-5 rounded-2xl border border-[#E4E7F2] shadow-sm flex items-center space-x-4">
+                <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl border border-emerald-200">
+                  <Check className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-[11px] font-semibold text-[#5C5A85] uppercase tracking-wider">Used / Saved Minutes</p>
+                  <h3 className="text-2xl font-black text-[#4D3FDC]">
+                    {totalMonthlyUsed}m <span className="text-sm font-bold text-emerald-700">({totalMonthlySavedMins}m saved)</span>
+                  </h3>
+                  <p className="text-[11px] text-[#5C5A85]">Unused daily balance saved</p>
+                </div>
+              </div>
+
+              {/* Total Daily Overtime */}
+              <div className={`p-5 rounded-2xl border shadow-sm flex items-center space-x-4 ${totalMonthlyOvertime > 0 ? 'bg-amber-50/70 border-amber-300' : 'bg-white border-[#E4E7F2]'}`}>
+                <div className={`p-3 rounded-xl border ${totalMonthlyOvertime > 0 ? 'bg-amber-100 text-amber-700 border-amber-300' : 'bg-emerald-50 text-emerald-600 border-emerald-200'}`}>
                   <AlertTriangle className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="text-[11px] font-bold text-[#5C5A85] uppercase tracking-wider">Total Break Exceed Staff Count</p>
-                  <h3 className={`text-2xl font-black ${staffOver26Count > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
-                    {staffOver26Count} {staffOver26Count === 1 ? 'Staff' : 'Staff'}
+                  <p className="text-[11px] font-bold text-[#5C5A85] uppercase tracking-wider">Monthly Overtime (Daily Rule)</p>
+                  <h3 className={`text-2xl font-black ${totalMonthlyOvertime > 0 ? 'text-amber-800' : 'text-emerald-700'}`}>
+                    {totalMonthlyOvertime} min ({staffOver26Count} Staff)
                   </h3>
-                  <p className="text-[11px] font-semibold text-[#5C5A85]">Exceeded Monthly Entitled</p>
+                  <p className="text-[11px] font-semibold text-[#5C5A85]">Sum of daily overtime &gt; allowance</p>
                 </div>
               </div>
 
@@ -3354,7 +3663,7 @@ export default function App() {
                   <AlertTriangle className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-[#5C5A85]">Critical Overrun (+4h Over)</p>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-[#5C5A85]">Critical Overrun (+4h Overtime)</p>
                   <h3 className={`text-2xl font-black ${staffOver30Count > 0 ? 'text-rose-600' : 'text-[#171262]'}`}>
                     {staffOver30Count} {staffOver30Count === 1 ? 'Breach' : 'Breaches'}
                   </h3>
@@ -3369,43 +3678,27 @@ export default function App() {
                 <table className="w-full text-left text-xs">
                   <thead className="bg-[#F8F9FE] text-[#5C5A85] uppercase font-bold border-b border-[#E4E7F2]">
                     <tr>
-                      <th className="px-3.5 py-3.5 whitespace-nowrap">Emp ID</th>
+                      <th className="px-3 py-3.5 whitespace-nowrap">Emp ID</th>
                       <th className="px-4 py-3.5 whitespace-nowrap">Employee Name</th>
-                      <th className="px-3 py-3.5 whitespace-nowrap text-center">Shift</th>
-                      <th className="px-4 py-3.5 whitespace-nowrap text-center">Monthly Entitled</th>
-                      <th className="px-4 py-3.5 whitespace-nowrap text-center">Total Consumed</th>
-                      <th className="px-4 py-3.5 whitespace-nowrap text-center">Net Variance (vs Entitled)</th>
-                      <th className="px-4 py-3.5 whitespace-nowrap text-center">Adherence Status</th>
+                      <th className="px-2.5 py-3.5 whitespace-nowrap text-center">Shift</th>
+                      <th className="px-3 py-3.5 whitespace-nowrap text-center">Days Present</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Entitled</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Used</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Difference</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Overtime</th>
+                      <th className="px-3 py-3.5 whitespace-nowrap text-center">Days Over Allowance</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Saved Minutes</th>
+                      <th className="px-3.5 py-3.5 whitespace-nowrap text-center">Adherence Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#EAEFF8]">
                     {monthlyReportStaff.map((st) => {
-                      const userLogs = monthlyLogs.filter((l) => l.staffId === st.id);
-                      const breaksCount = userLogs.length;
-                      const consumedMins = userLogs.reduce((acc, l) => acc + l.durationMins, 0);
-                      const entitledMins = calculateMonthlyEntitledMins(st.shift, userLogs, kioskSettings, 26);
-                      const criticalMins = entitledMins + 240; // +4h above entitled
-                      const netVarianceMins = consumedMins - entitledMins;
+                      const summary =
+                        monthlySummariesByStaffId.get(st.id) ||
+                        calculateEmployeeMonthlyReport(st.id, st.shift, reportMonth, validLogs, kioskSettings);
 
-                      const isOverEntitled = consumedMins > entitledMins;
-                      const isUnderEntitled = consumedMins < entitledMins;
-                      const isOverCritical = consumedMins > criticalMins;
-
-                      const entitledHours = Math.floor(entitledMins / 60);
-                      const entitledRemMins = entitledMins % 60;
-                      const entitledDigital = `${String(entitledHours).padStart(2, '0')}:${String(entitledRemMins).padStart(2, '0')} Hrs`;
-
-                      // Format Consumed time as exact hours and minutes
-                      const consumedHours = Math.floor(consumedMins / 60);
-                      const consumedMinutes = consumedMins % 60;
-                      const consumedFormatted = `${consumedHours}h ${String(consumedMinutes).padStart(2, '0')}m`;
-                      const consumedDigital = `${String(consumedHours).padStart(2, '0')}:${String(consumedMinutes).padStart(2, '0')} Hrs`;
-
-                      // Format Net Hours vs Entitled
-                      const netDiffAbs = Math.abs(netVarianceMins);
-                      const netDiffHours = Math.floor(netDiffAbs / 60);
-                      const netDiffMinutes = netDiffAbs % 60;
-                      const netDiffDigital = `${String(netDiffHours).padStart(2, '0')}:${String(netDiffMinutes).padStart(2, '0')} Hrs`;
+                      const isOverCritical = summary.overtimeMins > 240;
+                      const hasOvertime = summary.overtimeMins > 0;
 
                       return (
                         <tr
@@ -3413,99 +3706,115 @@ export default function App() {
                           className={`hover:bg-[#F9FAFE] transition ${
                             isOverCritical
                               ? 'bg-rose-50/70 border-l-4 border-l-rose-500'
-                              : isOverEntitled
+                              : hasOvertime
                               ? 'border-l-4 border-l-amber-400'
                               : ''
                           }`}
                         >
-                          <td className="px-3.5 py-3.5 font-mono font-bold text-[#4D3FDC] whitespace-nowrap">
+                          <td className="px-3 py-3.5 font-mono font-bold text-[#4D3FDC] whitespace-nowrap">
                             #{st.empId}
                           </td>
                           <td className="px-4 py-3.5">
                             <span className="font-bold text-[#171262] text-sm block tracking-normal break-words">{st.name}</span>
-                            <span className="text-[11px] text-[#5C5A85] tracking-wide">{breaksCount} {breaksCount === 1 ? 'break' : 'breaks'} recorded</span>
+                            <span className="text-[11px] text-[#5C5A85] tracking-wide">
+                              {summary.breaksCount} {summary.breaksCount === 1 ? 'break' : 'breaks'} • {summary.dailyAllowanceMins}m/day allowance
+                            </span>
                           </td>
-                          <td className="px-3 py-3.5 text-center whitespace-nowrap">
+                          <td className="px-2.5 py-3.5 text-center whitespace-nowrap">
                             <span className={`inline-block px-2.5 py-0.5 rounded text-[11px] font-bold tracking-wide ${st.shift === 'Morning' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9]'}`}>
                               {st.shift}
                             </span>
                           </td>
 
-                          {/* 1. Monthly Entitled: Uses log's saved allottedMins where taken + current setting where untaken */}
-                          <td className="px-4 py-3.5 text-center whitespace-nowrap">
-                            <span className="font-mono font-bold text-[#171262] text-xs px-2.5 py-1 rounded-lg bg-[#F6F7FC] border border-[#E4E7F2] inline-block shadow-2xs tracking-wider">
-                              {entitledDigital}
+                          {/* Days Present */}
+                          <td className="px-3 py-3.5 text-center whitespace-nowrap font-mono font-bold text-[#171262]">
+                            {summary.daysPresent} {summary.daysPresent === 1 ? 'day' : 'days'}
+                          </td>
+
+                          {/* Entitled (days present x allowance) */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            <span className="font-mono font-bold text-[#171262] text-xs px-2.5 py-1 rounded-lg bg-[#F6F7FC] border border-[#E4E7F2] inline-block shadow-2xs">
+                              {summary.entitledMins} min
                             </span>
-                            <span className="text-[11px] text-[#5C5A85] font-medium block mt-0.5">
-                              ({entitledMins} mins)
+                            <span className="text-[10px] text-[#5C5A85] block mt-0.5">
+                              {formatHoursMins(summary.entitledMins)}
                             </span>
                           </td>
 
-                          {/* 2. Total Consumed: Exact digital hours & minutes */}
-                          <td className="px-4 py-3.5 text-center whitespace-nowrap">
-                            <span className="font-mono font-black text-[#171262] text-sm block tracking-wider">
-                              {consumedDigital}
+                          {/* Used */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            <span className="font-mono font-black text-[#171262] text-sm block">
+                              {summary.usedMins} min
                             </span>
-                            <span className="text-[11px] text-[#5C5A85] font-medium block tracking-wide">
-                              {consumedFormatted} ({consumedMins} mins)
+                            <span className="text-[10px] text-[#5C5A85] block">
+                              {formatHoursMins(summary.usedMins)}
                             </span>
                           </td>
 
-                          {/* 3. Net Hours vs Entitled */}
-                          <td className="px-4 py-3.5 text-center whitespace-nowrap">
-                            {isOverEntitled ? (
-                              <div className="inline-flex flex-col items-center">
-                                <span className="font-mono font-black text-rose-600 text-sm px-2.5 py-0.5 rounded-lg bg-rose-50 border border-rose-200 inline-block tracking-wider">
-                                  +{netDiffDigital}
-                                </span>
-                                <span className="text-[11px] font-bold text-rose-600 mt-0.5 tracking-wide">
-                                  +{netDiffHours}h {netDiffMinutes}m Over Entitled
-                                </span>
-                              </div>
-                            ) : isUnderEntitled ? (
-                              <div className="inline-flex flex-col items-center">
-                                <span className="font-mono font-black text-emerald-600 text-sm px-2.5 py-0.5 rounded-lg bg-emerald-50 border border-emerald-200 inline-block tracking-wider">
-                                  -{netDiffDigital}
-                                </span>
-                                <span className="text-[11px] font-bold text-emerald-600 mt-0.5 tracking-wide">
-                                  {netDiffHours}h {netDiffMinutes}m Remaining
-                                </span>
-                              </div>
+                          {/* Difference (entitled minus used) */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            <span
+                              className={`font-mono font-bold text-xs px-2.5 py-1 rounded-lg inline-block ${
+                                summary.differenceMins < 0
+                                  ? 'bg-amber-50 text-amber-900 border border-amber-300'
+                                  : summary.differenceMins > 0
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-slate-100 text-slate-700 border border-slate-200'
+                              }`}
+                            >
+                              {summary.differenceMins > 0 ? `+${summary.differenceMins}` : summary.differenceMins} min
+                            </span>
+                          </td>
+
+                          {/* Overtime (sum of daily overtime) */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            {summary.overtimeMins > 0 ? (
+                              <span className="inline-flex items-center gap-1 font-mono font-black text-amber-900 text-xs px-2.5 py-1 rounded-lg bg-amber-100 border border-amber-300">
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                                <span>{summary.overtimeMins} min</span>
+                              </span>
                             ) : (
-                              <div className="inline-flex flex-col items-center">
-                                <span className="font-mono font-bold text-slate-600 text-sm px-2.5 py-0.5 rounded-lg bg-slate-100 border border-slate-200 inline-block tracking-wider">
-                                  00:00 Hrs
-                                </span>
-                                <span className="text-[11px] font-medium text-slate-500 mt-0.5 tracking-wide">
-                                  Exact Entitled Target
-                                </span>
-                              </div>
+                              <span className="font-mono font-bold text-emerald-700 text-xs">0 min</span>
                             )}
                           </td>
 
-                          {/* 4. Adherence Status */}
-                          <td className="px-4 py-3.5 text-center whitespace-nowrap">
-                            {isOverCritical ? (
-                              <div className="flex flex-col items-center justify-center gap-1">
-                                <span className="px-3 py-1 text-[11px] font-black uppercase rounded-full bg-rose-600 text-white animate-pulse shadow-md flex items-center gap-1.5 tracking-wide">
-                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                  <span>CRITICAL OVERRUN!</span>
-                                </span>
-                                <span className="text-[11px] text-rose-600 font-bold font-mono tracking-wider">
-                                  +{formatHoursMins(consumedMins - criticalMins)} over critical limit
-                                </span>
-                              </div>
-                            ) : isOverEntitled ? (
-                              <span className="px-2.5 py-1 text-[11px] font-bold rounded-full bg-amber-50 text-amber-800 border border-amber-300 inline-block tracking-wide">
-                                Overtime (+{netDiffHours}h {netDiffMinutes}m)
-                              </span>
-                            ) : isUnderEntitled ? (
-                              <span className="px-2.5 py-1 text-[11px] font-bold rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 inline-block tracking-wide">
-                                Within Allotment (Compliant)
+                          {/* Days over allowance */}
+                          <td className="px-3 py-3.5 text-center whitespace-nowrap font-mono font-bold">
+                            {summary.daysOverAllowance > 0 ? (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 text-xs">
+                                {summary.daysOverAllowance} {summary.daysOverAllowance === 1 ? 'day' : 'days'}
                               </span>
                             ) : (
-                              <span className="px-2.5 py-1 text-[11px] font-bold rounded-full bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] inline-block tracking-wide">
-                                Exact Target
+                              <span className="text-slate-500">0</span>
+                            )}
+                          </td>
+
+                          {/* Saved minutes (sum of daily unused balance for days present) */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            <span className="font-mono font-bold text-emerald-700 text-xs px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 inline-block">
+                              {summary.savedMins} min
+                            </span>
+                          </td>
+
+                          {/* Adherence Status */}
+                          <td className="px-3.5 py-3.5 text-center whitespace-nowrap">
+                            {isOverCritical ? (
+                              <span className="px-2.5 py-1 text-[11px] font-black uppercase rounded-full bg-rose-600 text-white inline-flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 shrink-0" />
+                                <span>CRITICAL (+{summary.overtimeMins}m)</span>
+                              </span>
+                            ) : hasOvertime ? (
+                              <span className="px-2.5 py-1 text-[11px] font-bold rounded-full bg-amber-100 text-amber-900 border border-amber-300 inline-flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0" />
+                                <span>Over by {summary.overtimeMins} min</span>
+                              </span>
+                            ) : summary.daysPresent === 0 ? (
+                              <span className="px-2.5 py-1 text-[11px] font-medium rounded-full bg-slate-100 text-slate-500 border border-slate-200 inline-block">
+                                No Breaks Logged
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-1 text-[11px] font-bold rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 inline-block">
+                                Within Allowance
                               </span>
                             )}
                           </td>
@@ -4672,6 +4981,131 @@ export default function App() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL: SUPERVISOR FIX / VOID COMPLETED BREAK LOG ================= */}
+      {fixLogModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden border border-[#E4E7F2] animate-in fade-in zoom-in-95 duration-150">
+            <div className="bg-[#251B7C] p-4 text-white flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Edit2 className="w-5 h-5 text-amber-300" />
+                <div>
+                  <h3 className="font-bold text-sm text-white">Supervisor Fix / Void Break Log</h3>
+                  <p className="text-[11px] text-indigo-200">
+                    {fixLogModal.staffName} (#{fixLogModal.empId}) • {fixLogModal.breakType} ({fixLogModal.date})
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setFixLogModal(null)}
+                className="text-indigo-200 hover:text-white p-1 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveFixedLog} className="p-6 space-y-4 text-xs">
+              <div className="bg-[#F8F9FE] p-3 rounded-xl border border-[#E4E7F2] flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-[#5C5A85] block">Break Slot Allowed</span>
+                  <span className="font-mono font-bold text-[#171262]">{resolveAllottedMins(fixLogModal)} min</span>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-[#5C5A85] block">Current Counted</span>
+                  <span className="font-mono font-bold text-[#4D3FDC]">{getCountedMins(fixLogModal, kioskSettings)} min</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#171262] mb-1">
+                  Supervisor Fix Reason / Action
+                </label>
+                <select
+                  value={fixLogReason}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setFixLogReason(val);
+                    const slotMins = resolveAllottedMins(fixLogModal);
+                    if (val === 'Supervisor Forgot' || val === 'I forgot to stop earlier') {
+                      setFixLogCustomMinsStr(String(slotMins));
+                    } else if (val === 'Voided') {
+                      setFixLogCustomMinsStr('0');
+                    }
+                  }}
+                  className="w-full bg-[#F8F9FE] border border-[#E4E7F2] rounded-xl px-3 py-2.5 text-xs font-bold text-[#171262] focus:ring-2 focus:ring-[#4D3FDC]"
+                >
+                  <option value="Normal">Normal (Count recorded minutes)</option>
+                  <option value="Supervisor Forgot">
+                    Supervisor Forgot to Stop Timer (Count slot allowed: {resolveAllottedMins(fixLogModal)}m)
+                  </option>
+                  <option value="I forgot to stop earlier">
+                    Employee Forgot to Stop Earlier (Count slot allowed: {resolveAllottedMins(fixLogModal)}m)
+                  </option>
+                  <option value="Approved Extended">Approved Extended Break (Operational delay)</option>
+                  <option value="Interrupted Early">Break Interrupted Early (Recalled to floor)</option>
+                  <option value="Manual Override">Manual Counted Minutes Override</option>
+                  <option value="Voided">Void Break (Return minutes to daily balance)</option>
+                </select>
+              </div>
+
+              {fixLogReason !== 'Voided' && (
+                <div>
+                  <label className="block text-xs font-bold text-[#171262] mb-1">
+                    Counted Minutes (Updates Daily Balance &amp; Report Immediately)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={480}
+                      value={fixLogCustomMinsStr}
+                      onChange={(e) => setFixLogCustomMinsStr(e.target.value)}
+                      className="w-28 bg-white border-2 border-[#D5D0F9] rounded-xl px-3 py-2 text-sm font-mono font-black text-[#171262] focus:ring-2 focus:ring-[#4D3FDC]"
+                    />
+                    <span className="text-xs font-semibold text-[#5C5A85]">minutes</span>
+                    <button
+                      type="button"
+                      onClick={() => setFixLogCustomMinsStr(String(resolveAllottedMins(fixLogModal)))}
+                      className="px-2.5 py-1.5 rounded-lg bg-[#EEECFB] hover:bg-[#4D3FDC] text-[#4D3FDC] hover:text-white font-bold text-[11px] transition cursor-pointer"
+                    >
+                      Use Slot ({resolveAllottedMins(fixLogModal)}m)
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-[#171262] mb-1">
+                  Supervisor Note (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={fixLogNotes}
+                  onChange={(e) => setFixLogNotes(e.target.value)}
+                  placeholder="Reason for adjustment..."
+                  className="w-full bg-[#F8F9FE] border border-[#E4E7F2] rounded-xl px-3 py-2 text-xs text-[#171262] focus:ring-2 focus:ring-[#4D3FDC]"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#E4E7F2]">
+                <button
+                  type="button"
+                  onClick={() => setFixLogModal(null)}
+                  className="px-4 py-2 text-xs font-semibold text-[#5C5A85] hover:text-[#171262] bg-white border border-[#E4E7F2] rounded-xl transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 text-xs font-bold bg-[#4D3FDC] hover:bg-[#3E30CE] text-white rounded-xl shadow-md transition cursor-pointer"
+                >
+                  Save &amp; Update Balance
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

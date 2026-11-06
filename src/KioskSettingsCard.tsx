@@ -19,6 +19,7 @@ import {
   DEFAULT_SHIFT_BREAKS,
   DEFAULT_SHIFT_TIMINGS,
   getShiftBreakSlots,
+  getShiftDailyAllowanceMins,
   getShiftTimings,
   formatTime12h,
   changePinOnServer,
@@ -95,6 +96,13 @@ export default function KioskSettingsCard({
     String(initialNight[2].mins),
   ]);
 
+  const [morningAllowanceStr, setMorningAllowanceStr] = useState<string>(
+    String(getShiftDailyAllowanceMins(kioskSettings, 'Morning'))
+  );
+  const [nightAllowanceStr, setNightAllowanceStr] = useState<string>(
+    String(getShiftDailyAllowanceMins(kioskSettings, 'Night'))
+  );
+
   const [warningMinsStr, setWarningMinsStr] = useState<string>(String(kioskSettings.warningMins ?? 5));
   const [graceMinsStr, setGraceMinsStr] = useState<string>(String(kioskSettings.graceMins ?? 1));
   const [bigOvertimeMinsStr, setBigOvertimeMinsStr] = useState<string>(String(kioskSettings.bigOvertimeMins ?? 15));
@@ -106,6 +114,24 @@ export default function KioskSettingsCard({
 
   const [positiveText, setPositiveText] = useState<string>(
     (kioskSettings.positiveMessages || DEFAULT_KIOSK_SETTINGS.positiveMessages).join('\n')
+  );
+  const [warningText, setWarningText] = useState<string>(
+    (kioskSettings.warningMessages || DEFAULT_KIOSK_SETTINGS.warningMessages).join('\n')
+  );
+  const [calmMessageStr, setCalmMessageStr] = useState<string>(
+    kioskSettings.calmWithinAllowanceMessage ||
+      DEFAULT_KIOSK_SETTINGS.calmWithinAllowanceMessage ||
+      'Please try to return on time. Your day total is still within your break time.'
+  );
+  const [dailyOverMessageStr, setDailyOverMessageStr] = useState<string>(
+    kioskSettings.dailyOverAllowanceMessage ||
+      DEFAULT_KIOSK_SETTINGS.dailyOverAllowanceMessage ||
+      'Your breaks today are N min over your daily break time.'
+  );
+  const [bigOverSupervisorMessageStr, setBigOverSupervisorMessageStr] = useState<string>(
+    kioskSettings.bigOvertimeSupervisorMessage ||
+      DEFAULT_KIOSK_SETTINGS.bigOvertimeSupervisorMessage ||
+      'Please talk to your supervisor.'
   );
 
   // Plain-English validation error & saved status banner inside the page
@@ -135,6 +161,8 @@ export default function KioskSettingsCard({
       setMorningMinsStr([String(mSlots[0].mins), String(mSlots[1].mins), String(mSlots[2].mins)]);
       setNightNames([nSlots[0].name, nSlots[1].name, nSlots[2].name]);
       setNightMinsStr([String(nSlots[0].mins), String(nSlots[1].mins), String(nSlots[2].mins)]);
+      setMorningAllowanceStr(String(getShiftDailyAllowanceMins(kioskSettings, 'Morning')));
+      setNightAllowanceStr(String(getShiftDailyAllowanceMins(kioskSettings, 'Night')));
       setWarningMinsStr(String(kioskSettings.warningMins ?? 5));
       setGraceMinsStr(String(kioskSettings.graceMins ?? 1));
       setBigOvertimeMinsStr(String(kioskSettings.bigOvertimeMins ?? 15));
@@ -142,6 +170,22 @@ export default function KioskSettingsCard({
       setMaxSimulStr(String(kioskSettings.maxSimultaneousBreaks ?? 5));
       setAutoReturnStr(String(kioskSettings.autoReturnSecs ?? 30));
       setPositiveText((kioskSettings.positiveMessages || DEFAULT_KIOSK_SETTINGS.positiveMessages).join('\n'));
+      setWarningText((kioskSettings.warningMessages || DEFAULT_KIOSK_SETTINGS.warningMessages).join('\n'));
+      setCalmMessageStr(
+        kioskSettings.calmWithinAllowanceMessage ||
+          DEFAULT_KIOSK_SETTINGS.calmWithinAllowanceMessage ||
+          'Please try to return on time. Your day total is still within your break time.'
+      );
+      setDailyOverMessageStr(
+        kioskSettings.dailyOverAllowanceMessage ||
+          DEFAULT_KIOSK_SETTINGS.dailyOverAllowanceMessage ||
+          'Your breaks today are N min over your daily break time.'
+      );
+      setBigOverSupervisorMessageStr(
+        kioskSettings.bigOvertimeSupervisorMessage ||
+          DEFAULT_KIOSK_SETTINGS.bigOvertimeSupervisorMessage ||
+          'Please talk to your supervisor.'
+      );
     }
   }, [kioskSettings]);
 
@@ -202,12 +246,26 @@ export default function KioskSettingsCard({
       setMorningMinsStr((prev) => {
         const next = [...prev] as [string, string, string];
         next[idx] = val;
+        const oldSum =
+          getLiveMins(prev[0]) + getLiveMins(prev[1]) + getLiveMins(prev[2]);
+        const newSum =
+          getLiveMins(next[0]) + getLiveMins(next[1]) + getLiveMins(next[2]);
+        setMorningAllowanceStr((curAllow) =>
+          Number(curAllow) === oldSum && newSum >= 1 ? String(newSum) : curAllow
+        );
         return next;
       });
     } else {
       setNightMinsStr((prev) => {
         const next = [...prev] as [string, string, string];
         next[idx] = val;
+        const oldSum =
+          getLiveMins(prev[0]) + getLiveMins(prev[1]) + getLiveMins(prev[2]);
+        const newSum =
+          getLiveMins(next[0]) + getLiveMins(next[1]) + getLiveMins(next[2]);
+        setNightAllowanceStr((curAllow) =>
+          Number(curAllow) === oldSum && newSum >= 1 ? String(newSum) : curAllow
+        );
         return next;
       });
     }
@@ -269,6 +327,21 @@ export default function KioskSettingsCard({
       return;
     }
     setInvalidSlotKeys(new Set());
+
+    // 1b. Validate Daily Break Allowance per shift (1 to 480)
+    const parsedMorningAllowance = parseWholeNumberInRange(morningAllowanceStr, 1, 480);
+    if (parsedMorningAllowance === null) {
+      setValidationError('Please enter a Morning daily break allowance from 1 to 480 minutes');
+      showToast('Please enter a Morning daily break allowance from 1 to 480 minutes', 'danger');
+      return;
+    }
+
+    const parsedNightAllowance = parseWholeNumberInRange(nightAllowanceStr, 1, 480);
+    if (parsedNightAllowance === null) {
+      setValidationError('Please enter a Night daily break allowance from 1 to 480 minutes');
+      showToast('Please enter a Night daily break allowance from 1 to 480 minutes', 'danger');
+      return;
+    }
 
     // 2. Validate other editable times in Settings with sensible limits
     const parsedWarning = parseWholeNumberInRange(warningMinsStr, 0, 30);
@@ -342,6 +415,10 @@ export default function KioskSettingsCard({
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
+    const warnLines = warningText
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     const nowTs = Date.now();
     const nextVersion = (draft.version || kioskSettings.version || 1) + 1;
@@ -355,6 +432,23 @@ export default function KioskSettingsCard({
       needsReviewRunningMins: parsedNeedsReview,
       maxSimultaneousBreaks: parsedMaxSimul,
       autoReturnSecs: parsedAutoReturn,
+      dailyAllowanceMins: {
+        Morning: parsedMorningAllowance,
+        Night: parsedNightAllowance,
+      },
+      showLiveBalanceOnBreak: draft.showLiveBalanceOnBreak !== false,
+      calmWithinAllowanceMessage:
+        calmMessageStr.trim() ||
+        DEFAULT_KIOSK_SETTINGS.calmWithinAllowanceMessage ||
+        'Please try to return on time. Your day total is still within your break time.',
+      dailyOverAllowanceMessage:
+        dailyOverMessageStr.trim() ||
+        DEFAULT_KIOSK_SETTINGS.dailyOverAllowanceMessage ||
+        'Your breaks today are N min over your daily break time.',
+      bigOvertimeSupervisorMessage:
+        bigOverSupervisorMessageStr.trim() ||
+        DEFAULT_KIOSK_SETTINGS.bigOvertimeSupervisorMessage ||
+        'Please talk to your supervisor.',
       updatedAt: nowTs,
       version: nextVersion,
       shiftBreaks: {
@@ -377,6 +471,7 @@ export default function KioskSettingsCard({
         [nightSlots[2].name]: nightSlots[2].mins,
       },
       positiveMessages: posLines.length > 0 ? posLines : DEFAULT_KIOSK_SETTINGS.positiveMessages,
+      warningMessages: warnLines.length > 0 ? warnLines : DEFAULT_KIOSK_SETTINGS.warningMessages,
     };
 
     setDraft(updated);
@@ -408,6 +503,8 @@ export default function KioskSettingsCard({
       DEFAULT_SHIFT_BREAKS.Night[2].name,
     ]);
     setNightMinsStr(['20', '20', '20']);
+    setMorningAllowanceStr('60');
+    setNightAllowanceStr('60');
     setWarningMinsStr('5');
     setGraceMinsStr('1');
     setBigOvertimeMinsStr('15');
@@ -415,6 +512,18 @@ export default function KioskSettingsCard({
     setMaxSimulStr('5');
     setAutoReturnStr('30');
     setPositiveText(DEFAULT_KIOSK_SETTINGS.positiveMessages.join('\n'));
+    setWarningText(DEFAULT_KIOSK_SETTINGS.warningMessages.join('\n'));
+    setCalmMessageStr(
+      DEFAULT_KIOSK_SETTINGS.calmWithinAllowanceMessage ||
+        'Please try to return on time. Your day total is still within your break time.'
+    );
+    setDailyOverMessageStr(
+      DEFAULT_KIOSK_SETTINGS.dailyOverAllowanceMessage ||
+        'Your breaks today are N min over your daily break time.'
+    );
+    setBigOverSupervisorMessageStr(
+      DEFAULT_KIOSK_SETTINGS.bigOvertimeSupervisorMessage || 'Please talk to your supervisor.'
+    );
     setValidationError(null);
     setInvalidSlotKeys(new Set());
     safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(restored));
@@ -875,9 +984,41 @@ export default function KioskSettingsCard({
               })}
             </div>
 
-            <div className="pt-1 flex items-center justify-between text-xs font-black text-amber-950">
-              <span>Morning Shift Summary ({morningNames.join(' + ')})</span>
-              <span>Total break time per shift: {morningTotalMins} minutes</span>
+            <div className="pt-2 border-t border-amber-200/80 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-black text-amber-950 block">
+                  Daily break allowance (minutes) — Morning Shift (1 to 480)
+                </span>
+                <span className="text-[11px] text-amber-900/80 block">
+                  Total daily break minutes allowed per person before daily overtime starts (default = sum of the 3 breaks: {morningTotalMins} min).
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={morningAllowanceStr}
+                  onChange={(e) => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setMorningAllowanceStr(e.target.value);
+                  }}
+                  aria-label="Morning Shift Daily break allowance (minutes)"
+                  className="w-24 bg-white border-2 border-amber-400 rounded-lg px-3 py-1.5 font-mono font-black text-sm text-[#171262]"
+                />
+                <span className="text-xs font-extrabold text-amber-950">minutes</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setMorningAllowanceStr(String(Math.max(1, morningTotalMins)));
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-[11px] cursor-pointer transition shadow-2xs"
+                >
+                  Use total of the 3 breaks ({morningTotalMins}m)
+                </button>
+              </div>
             </div>
           </div>
 
@@ -982,9 +1123,41 @@ export default function KioskSettingsCard({
               })}
             </div>
 
-            <div className="pt-1 flex items-center justify-between text-xs font-black text-[#251B7C]">
-              <span>Night Shift Summary ({nightNames.join(' + ')})</span>
-              <span>Total break time per shift: {nightTotalMins} minutes</span>
+            <div className="pt-2 border-t border-[#D5D0F9] flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-black text-[#251B7C] block">
+                  Daily break allowance (minutes) — Night Shift (1 to 480)
+                </span>
+                <span className="text-[11px] text-[#5C5A85] block">
+                  Total daily break minutes allowed per person before daily overtime starts (default = sum of the 3 breaks: {nightTotalMins} min).
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={nightAllowanceStr}
+                  onChange={(e) => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setNightAllowanceStr(e.target.value);
+                  }}
+                  aria-label="Night Shift Daily break allowance (minutes)"
+                  className="w-24 bg-white border-2 border-[#4D3FDC] rounded-lg px-3 py-1.5 font-mono font-black text-sm text-[#171262]"
+                />
+                <span className="text-xs font-extrabold text-[#251B7C]">minutes</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setNightAllowanceStr(String(Math.max(1, nightTotalMins)));
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-[#4D3FDC] hover:bg-[#3B2EC9] text-white font-black text-[11px] cursor-pointer transition shadow-2xs"
+                >
+                  Use total of the 3 breaks ({nightTotalMins}m)
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1133,8 +1306,24 @@ export default function KioskSettingsCard({
           </div>
         </div>
 
-        {/* 3. Toggles: Soft Sound & Allowed Time Windows */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {/* 3. Toggles: Live Balance, Soft Sound & Allowed Time Windows */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <label className="p-3 rounded-xl bg-[#F8F9FE] border border-[#E4E7F2] flex items-center space-x-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={draft.showLiveBalanceOnBreak !== false}
+              onChange={(e) => {
+                setSavedNotice(null);
+                setDraft((prev) => ({ ...prev, showLiveBalanceOnBreak: e.target.checked }));
+              }}
+              className="w-4 h-4 rounded text-[#4D3FDC]"
+            />
+            <div>
+              <span className="font-bold text-[#171262] block">Show live balance during a break</span>
+              <span className="text-[11px] text-[#5C5A85]">Shows &quot;Balance now: X min left&quot; on On Break cards</span>
+            </div>
+          </label>
+
           <label className="p-3 rounded-xl bg-[#F8F9FE] border border-[#E4E7F2] flex items-center space-x-2.5 cursor-pointer">
             <input
               type="checkbox"
@@ -1233,20 +1422,89 @@ export default function KioskSettingsCard({
           </div>
         )}
 
-        {/* 4. Editable Friendly On-Time Messages */}
-        <div>
-          <label className="block font-bold text-[#171262] mb-1">
-            Friendly On-Time Return Lines (One per line — short, easy English)
-          </label>
-          <textarea
-            rows={3}
-            value={positiveText}
-            onChange={(e) => {
-              setSavedNotice(null);
-              setPositiveText(e.target.value);
-            }}
-            className="w-full bg-[#F8F9FE] border border-[#E4E7F2] rounded-xl p-2.5 text-[11px] text-[#171262] font-medium"
-          />
+        {/* 4. Editable Friendly & Overtime Messages */}
+        <div className="space-y-3 p-4 rounded-2xl bg-[#F8F9FE] border border-[#E4E7F2]">
+          <h4 className="font-black text-[#171262] text-sm">
+            4. Kiosk Return &amp; Daily Balance Messages (Editable)
+          </h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block font-bold text-[#171262] mb-1">
+                Friendly On-Time Return Lines (One per line)
+              </label>
+              <textarea
+                rows={3}
+                value={positiveText}
+                onChange={(e) => {
+                  setSavedNotice(null);
+                  setPositiveText(e.target.value);
+                }}
+                className="w-full bg-white border border-[#D5D0F9] rounded-xl p-2.5 text-[11px] text-[#171262] font-medium"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#171262] mb-1">
+                Soft Warning Line When a Single Break Runs Late (One per line)
+              </label>
+              <textarea
+                rows={3}
+                value={warningText}
+                onChange={(e) => {
+                  setSavedNotice(null);
+                  setWarningText(e.target.value);
+                }}
+                className="w-full bg-white border border-[#D5D0F9] rounded-xl p-2.5 text-[11px] text-[#171262] font-medium"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+            <div>
+              <label className="block font-bold text-[#171262] mb-1">
+                Calm Line (Late on break, but within daily allowance)
+              </label>
+              <input
+                type="text"
+                value={calmMessageStr}
+                onChange={(e) => {
+                  setSavedNotice(null);
+                  setCalmMessageStr(e.target.value);
+                }}
+                className="w-full bg-white border border-[#D5D0F9] rounded-xl px-3 py-2 text-[11px] text-[#171262] font-medium"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#171262] mb-1">
+                Over Daily Allowance Line (Use &quot;N&quot; for minutes over)
+              </label>
+              <input
+                type="text"
+                value={dailyOverMessageStr}
+                onChange={(e) => {
+                  setSavedNotice(null);
+                  setDailyOverMessageStr(e.target.value);
+                }}
+                className="w-full bg-white border border-[#D5D0F9] rounded-xl px-3 py-2 text-[11px] text-[#171262] font-medium"
+              />
+            </div>
+
+            <div>
+              <label className="block font-bold text-[#171262] mb-1">
+                Big Overtime Supervisor Line
+              </label>
+              <input
+                type="text"
+                value={bigOverSupervisorMessageStr}
+                onChange={(e) => {
+                  setSavedNotice(null);
+                  setBigOverSupervisorMessageStr(e.target.value);
+                }}
+                className="w-full bg-white border border-[#D5D0F9] rounded-xl px-3 py-2 text-[11px] text-[#171262] font-medium"
+              />
+            </div>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2">

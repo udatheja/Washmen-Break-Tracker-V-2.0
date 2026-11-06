@@ -18,6 +18,7 @@ import {
   KioskSettings,
   mergeState,
   mergeAuthAccounts,
+  pruneLogsOlderThanSixMonths,
 } from './kioskTypes';
 
 function resolveFirebaseConfig(raw: typeof firebaseConfig) {
@@ -128,16 +129,22 @@ export function buildBoundedStationPayload(
   }
 ): CloudStationSyncPayload {
   const clean = stripUndefinedDeep(raw);
+  const rawLogs = Array.isArray(clean.logs) ? clean.logs : [];
+  const { retainedLogs, prunedIds } = pruneLogsOlderThanSixMonths(rawLogs);
+  const mergedDeletedLogs = Array.from(
+    new Set([
+      ...(Array.isArray(clean.deletedLogs) ? clean.deletedLogs : []),
+      ...prunedIds,
+    ])
+  );
   return {
     stationId: STATION_SYNC_DOC_ID,
     syncToken: STATION_SYNC_TOKEN,
     authAccounts: Array.isArray(clean.authAccounts) ? clean.authAccounts.slice(0, 10) : [],
     staff: Array.isArray(clean.staff) ? clean.staff.slice(0, 200) : [],
     activeBreaks: Array.isArray(clean.activeBreaks) ? clean.activeBreaks.slice(0, 100) : [],
-    logs: Array.isArray(clean.logs) ? clean.logs.slice(0, 1000) : [],
-    deletedLogs: Array.isArray(clean.deletedLogs)
-      ? clean.deletedLogs.map((id) => String(id).slice(0, 128)).slice(0, 1000)
-      : [],
+    logs: retainedLogs.slice(0, 1000),
+    deletedLogs: mergedDeletedLogs.map((id) => String(id).slice(0, 128)).slice(0, 1000),
     deletedStaff: Array.isArray(clean.deletedStaff)
       ? clean.deletedStaff.map((id) => String(id).slice(0, 128)).slice(0, 200)
       : [],

@@ -38,6 +38,8 @@ import {
   getShiftTimings,
   formatTime12h,
   isLogInCurrentShiftCycle,
+  getCurrentShiftDate,
+  getDailyBalance,
   getVerifiedDeveloperMetadata,
   attachSafeCreditWatchdog,
   WASHMEN_LOGO_FALLBACK,
@@ -636,15 +638,19 @@ export default function EmployeeKiosk({
     return <CupSoda className={className} />;
   };
 
-  // Verify Supervisor Password to Cancel a Running Break ("Started by mistake? Cancel")
+  // Verify Unlock Code "0000" to Cancel a Running Break ("Started by mistake? Cancel")
   const handleVerifyCancelBreakPin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!cancelBreakModal) return;
     setVerifyingCancelPin(true);
     setCancelPinError('');
     const trimmed = cancelPinInput.trim();
-    const res = await verifyPinOnServer(trimmed);
-    const isValid = res.valid || trimmed === '0000';
+    const isZeroCode = trimmed === '0000';
+    let isValid = isZeroCode;
+    if (!isValid && trimmed.length > 0) {
+      const res = await verifyPinOnServer(trimmed);
+      isValid = res.valid;
+    }
     setVerifyingCancelPin(false);
     if (isValid) {
       const targetBreak = cancelBreakModal;
@@ -654,7 +660,7 @@ export default function EmployeeKiosk({
       onVoidBreakFromKiosk(targetBreak);
       goHome();
     } else {
-      setCancelPinError('Wrong password. Please ask your supervisor.');
+      setCancelPinError('Wrong unlock code. Please enter 0000 to cancel this break.');
     }
   };
 
@@ -796,6 +802,16 @@ export default function EmployeeKiosk({
                       brk.breakSlot
                     );
 
+                    const liveBal = getDailyBalance(
+                      brk.staffId,
+                      getCurrentShiftDate(brk.shift, now, kioskSettings),
+                      logs,
+                      brk,
+                      now,
+                      kioskSettings,
+                      brk.shift
+                    );
+
                     // SVG Countdown Ring
                     const radius = 34;
                     const circumference = 2 * Math.PI * radius;
@@ -849,6 +865,27 @@ export default function EmployeeKiosk({
                           <p className="text-[22px] sm:text-2xl font-black text-[#171262] leading-snug break-words">
                             {brk.staffName}
                           </p>
+
+                          {/* Live Daily Balance (decreases while break runs; optional in Settings, default ON) */}
+                          {kioskSettings.showLiveBalanceOnBreak !== false && (
+                            <div>
+                              {liveBal.isLiveOverAllowance ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-200/90 text-amber-950 border border-amber-400 text-sm sm:text-base font-black">
+                                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                                  <span>Over by {liveBal.liveOvertimeMins} min</span>
+                                </span>
+                              ) : liveBal.liveBalanceMins === 0 ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-200/90 text-amber-950 border border-amber-400 text-sm sm:text-base font-black">
+                                  <Clock className="w-4 h-4 text-amber-700 shrink-0" />
+                                  <span>Balance now: none left</span>
+                                </span>
+                              ) : (
+                                <span className="text-sm sm:text-base font-extrabold text-[#251B7C] block">
+                                  Balance now: {liveBal.liveBalanceMins} min left
+                                </span>
+                              )}
+                            </div>
+                          )}
 
                           {/* Back by HH:MM */}
                           <p className="text-base sm:text-lg font-extrabold text-[#383560]">
@@ -938,6 +975,20 @@ export default function EmployeeKiosk({
                   const runningBreak = activeBreaks.find((b) => b.staffId === emp.id);
                   const usedSlots = getUsedSlotsForStaff(emp.id);
                   const allThreeDone = !runningBreak && usedSlots.size >= 3;
+                  const empShiftDate = getCurrentShiftDate(emp.shift, now, kioskSettings);
+                  const bal = getDailyBalance(
+                    emp.id,
+                    empShiftDate,
+                    logs,
+                    runningBreak,
+                    now,
+                    kioskSettings,
+                    emp.shift
+                  );
+                  const progressPct = Math.max(
+                    0,
+                    Math.min(100, Math.round((bal.usedMins / Math.max(1, bal.allowanceMins)) * 100))
+                  );
 
                   return (
                     <button
@@ -945,30 +996,98 @@ export default function EmployeeKiosk({
                       type="button"
                       disabled={allThreeDone}
                       onClick={() => handleSelectEmployeeTile(emp)}
-                      className={`min-h-[80px] p-5 rounded-2xl border-2 text-left flex items-center justify-between gap-3 transition motion-reduce:transition-none ${
+                      className={`min-h-[96px] p-5 rounded-2xl border-2 text-left flex flex-col justify-between gap-2.5 transition motion-reduce:transition-none ${
                         runningBreak
                           ? 'bg-blue-700 hover:bg-blue-800 text-white border-blue-800 shadow-md cursor-pointer'
                           : allThreeDone
-                          ? 'bg-slate-100 border-slate-300 text-slate-600 cursor-not-allowed'
+                          ? 'bg-slate-100 border-slate-300 text-slate-700 cursor-not-allowed'
                           : 'bg-[#FAFBFD] hover:bg-[#EEECFB] border-[#C7C2F5] hover:border-[#4D3FDC] text-[#171262] shadow-2xs cursor-pointer'
                       }`}
                     >
-                      {/* Name only (at least 20px, wraps, never cut) */}
-                      <span className="text-[21px] sm:text-[22px] font-black leading-snug break-words">
-                        {emp.name}
-                      </span>
+                      <div className="w-full flex items-center justify-between gap-3">
+                        {/* Name (at least 20px, wraps, never cut) */}
+                        <span className="text-[21px] sm:text-[22px] font-black leading-snug break-words">
+                          {emp.name}
+                        </span>
 
-                      {runningBreak ? (
-                        <span className="px-3.5 py-2 rounded-xl bg-white text-blue-800 font-black text-base shrink-0 flex items-center gap-1.5 shadow-2xs">
-                          <Clock className="w-5 h-5 shrink-0" />
-                          <span>On break</span>
-                        </span>
-                      ) : allThreeDone ? (
-                        <span className="px-3.5 py-2 rounded-xl bg-slate-200 text-slate-800 font-extrabold text-base shrink-0 flex items-center gap-1.5">
-                          <Check className="w-5 h-5 shrink-0" />
-                          <span>All breaks done</span>
-                        </span>
-                      ) : null}
+                        {runningBreak ? (
+                          <span className="px-3.5 py-2 rounded-xl bg-white text-blue-800 font-black text-base shrink-0 flex items-center gap-1.5 shadow-2xs">
+                            <Clock className="w-5 h-5 shrink-0" />
+                            <span>On break</span>
+                          </span>
+                        ) : allThreeDone ? (
+                          <span className="px-3.5 py-2 rounded-xl bg-slate-200 text-slate-800 font-extrabold text-base shrink-0 flex items-center gap-1.5">
+                            <Check className="w-5 h-5 shrink-0" />
+                            <span>All breaks done</span>
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {/* Daily Balance Line (at least 14px) + Thin Progress Bar */}
+                      <div className="w-full space-y-1.5 pt-0.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          {bal.isOverAllowance ? (
+                            <span
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-sm sm:text-[15px] font-black ${
+                                runningBreak
+                                  ? 'bg-amber-300 text-slate-950'
+                                  : 'bg-amber-100 text-amber-950 border border-amber-400'
+                              }`}
+                            >
+                              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                              <span>Over by {bal.overtimeMins} min</span>
+                            </span>
+                          ) : bal.isZeroBalance ? (
+                            <span
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-sm sm:text-[15px] font-black ${
+                                runningBreak
+                                  ? 'bg-amber-300 text-slate-950'
+                                  : 'bg-amber-100 text-amber-950 border border-amber-400'
+                              }`}
+                            >
+                              <Clock className="w-4 h-4 text-amber-700 shrink-0" />
+                              <span>Balance: none left</span>
+                            </span>
+                          ) : (
+                            <span
+                              className={`text-sm sm:text-[15px] font-extrabold ${
+                                runningBreak
+                                  ? 'text-blue-100'
+                                  : allThreeDone
+                                  ? 'text-slate-700'
+                                  : 'text-[#383560]'
+                              }`}
+                            >
+                              Balance: {bal.balanceMins} min left
+                            </span>
+                          )}
+                          <span
+                            className={`text-xs font-bold ${
+                              runningBreak ? 'text-blue-100' : 'text-[#5C5A85]'
+                            }`}
+                          >
+                            {bal.usedMins}/{bal.allowanceMins} min used
+                          </span>
+                        </div>
+
+                        {/* Thin Progress Bar (used out of allowance) */}
+                        <div
+                          className={`w-full h-1.5 rounded-full overflow-hidden ${
+                            runningBreak ? 'bg-blue-900/60' : 'bg-slate-200'
+                          }`}
+                        >
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              bal.isOverAllowance || bal.isZeroBalance
+                                ? 'bg-amber-500'
+                                : runningBreak
+                                ? 'bg-cyan-300'
+                                : 'bg-[#4D3FDC]'
+                            }`}
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                      </div>
                     </button>
                   );
                 })}
@@ -1002,13 +1121,39 @@ export default function EmployeeKiosk({
             shiftSlots.find((s) => s.slot === selectedSlotNumber && !usedSlots.has(s.slot)) ||
             shiftSlots.find((s) => !usedSlots.has(s.slot)) ||
             shiftSlots[0];
+          const empBal = getDailyBalance(
+            screen.employee.id,
+            getCurrentShiftDate(screen.employee.shift, now, kioskSettings),
+            logs,
+            null,
+            now,
+            kioskSettings,
+            screen.employee.shift
+          );
 
           return (
             <div className="bg-white p-6 sm:p-8 rounded-3xl border-2 border-[#E4E7F2] shadow-sm max-w-4xl mx-auto space-y-6">
               <div className="flex items-center justify-between flex-wrap gap-4">
-                <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
-                  Hello, {screen.employee.name}
-                </h2>
+                <div className="space-y-1">
+                  <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
+                    Hello, {screen.employee.name}
+                  </h2>
+                  {empBal.isOverAllowance ? (
+                    <p className="text-lg sm:text-xl font-black text-amber-900 inline-flex items-center gap-2 bg-amber-100 border border-amber-400 px-3.5 py-1 rounded-xl">
+                      <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+                      <span>You have 0 min left today (Over by {empBal.overtimeMins} min)</span>
+                    </p>
+                  ) : empBal.isZeroBalance ? (
+                    <p className="text-lg sm:text-xl font-black text-amber-900 inline-flex items-center gap-2 bg-amber-100 border border-amber-400 px-3.5 py-1 rounded-xl">
+                      <Clock className="w-5 h-5 text-amber-700 shrink-0" />
+                      <span>You have 0 min left today</span>
+                    </p>
+                  ) : (
+                    <p className="text-xl sm:text-2xl font-extrabold text-[#4D3FDC]">
+                      You have {empBal.balanceMins} min left today
+                    </p>
+                  )}
+                </div>
 
                 <button
                   type="button"
@@ -1277,121 +1422,176 @@ export default function EmployeeKiosk({
         })()}
 
         {/* ================= SCREEN 4 RESULT: AFTER STOPPING BREAK ================= */}
-        {screen.view === 'resultScreen' && (
-          <div
-            className={`p-8 sm:p-10 rounded-3xl border-2 shadow-xl max-w-2xl mx-auto text-center space-y-6 ${
-              screen.isOvertime
-                ? 'bg-amber-50 border-amber-500 text-[#171262]'
-                : 'bg-emerald-50 border-emerald-600 text-[#171262]'
-            }`}
-          >
-            {/* Top Icon: Green check if on time, Amber clock icon (NOT red) if overtime */}
-            <div className="flex justify-center">
-              {screen.isOvertime ? (
-                <div className="w-20 h-20 rounded-3xl bg-amber-200 text-amber-900 flex items-center justify-center">
-                  <Clock className="w-12 h-12" />
+        {screen.view === 'resultScreen' && (() => {
+          const logsWithCurrent = [
+            screen.completedLog,
+            ...logs.filter((l) => l.id !== screen.completedLog.id),
+          ];
+          const dayBal = getDailyBalance(
+            screen.completedLog.staffId,
+            getCurrentShiftDate(screen.completedLog.shift, now, kioskSettings),
+            logsWithCurrent,
+            null,
+            now,
+            kioskSettings,
+            screen.completedLog.shift
+          );
+          const warnLines = (kioskSettings.warningMessages || [])
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const softWarnText =
+            warnLines[0] || 'Please come back on time next time.';
+          const calmWithinLine =
+            kioskSettings.calmWithinAllowanceMessage ||
+            'Please try to return on time. Your day total is still within your break time.';
+          const dailyOverTemplate =
+            kioskSettings.dailyOverAllowanceMessage ||
+            'Your breaks today are N min over your daily break time.';
+          const dailyOverLine = dailyOverTemplate.replace(
+            /N/g,
+            String(dayBal.overtimeMins)
+          );
+          const bigOverSupervisorLine =
+            kioskSettings.bigOvertimeSupervisorMessage ||
+            'Please talk to your supervisor.';
+          const isDailyBigOvertime =
+            dayBal.isOverAllowance &&
+            dayBal.overtimeMins > Number(kioskSettings.bigOvertimeMins ?? 15);
+
+          return (
+            <div
+              className={`p-8 sm:p-10 rounded-3xl border-2 shadow-xl max-w-2xl mx-auto text-center space-y-6 ${
+                screen.isOvertime || dayBal.isOverAllowance
+                  ? 'bg-amber-50 border-amber-500 text-[#171262]'
+                  : 'bg-emerald-50 border-emerald-600 text-[#171262]'
+              }`}
+            >
+              {/* Top Icon: Green check if on time, Amber clock icon (NOT red) if overtime */}
+              <div className="flex justify-center">
+                {screen.isOvertime || dayBal.isOverAllowance ? (
+                  <div className="w-20 h-20 rounded-3xl bg-amber-200 text-amber-900 flex items-center justify-center">
+                    <Clock className="w-12 h-12" />
+                  </div>
+                ) : (
+                  <div className="w-20 h-20 rounded-3xl bg-emerald-200 text-emerald-900 flex items-center justify-center">
+                    <CheckCircle2 className="w-12 h-12" />
+                  </div>
+                )}
+              </div>
+
+              {/* Result Text: Keep current friendly or soft-warning message as it is */}
+              {!screen.isOvertime ? (
+                <div className="space-y-2">
+                  <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
+                    Welcome back, {screen.completedLog.staffName}!
+                  </h2>
+                  <p className="text-2xl font-extrabold text-emerald-900">{screen.friendlyLine}</p>
+                  {screen.isEarly && (
+                    <p className="text-xl font-bold text-[#171262] pt-1">
+                      You used {screen.usedMins} min. {screen.savedMins} min saved.
+                    </p>
+                  )}
                 </div>
               ) : (
-                <div className="w-20 h-20 rounded-3xl bg-emerald-200 text-emerald-900 flex items-center justify-center">
-                  <CheckCircle2 className="w-12 h-12" />
+                <div className="space-y-2">
+                  <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
+                    {screen.completedLog.staffName}, you were {screen.overtimeMins} min late.
+                  </h2>
+                  <p className="text-2xl font-extrabold text-amber-950">
+                    {softWarnText}
+                  </p>
                 </div>
               )}
-            </div>
 
-            {/* Result Text: Short and Kind */}
-            {!screen.isOvertime ? (
-              <div className="space-y-2">
-                <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
-                  Welcome back, {screen.completedLog.staffName}!
-                </h2>
-                <p className="text-2xl font-extrabold text-emerald-900">{screen.friendlyLine}</p>
-                {screen.isEarly && (
-                  <p className="text-xl font-bold text-[#171262] pt-1">
-                    You used {screen.usedMins} min. {screen.savedMins} min saved.
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <h2 className="text-3xl sm:text-4xl font-black text-[#171262] break-words">
-                  {screen.completedLog.staffName}, you were {screen.overtimeMins} min late.
-                </h2>
-                <p className="text-2xl font-extrabold text-amber-950">
-                  Please come back on time next time.
+              {/* Daily Balance & Daily Allowance Status Lines */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-white border-2 border-black/10 space-y-2">
+                <p className="text-xl sm:text-2xl font-black text-[#171262]">
+                  Balance left today: {Math.max(0, dayBal.balanceMins)} min
                 </p>
-                {screen.isBigOvertime && (
-                  <p className="text-2xl font-black text-amber-950 pt-1">
-                    Please talk to your supervisor.
+
+                {screen.isOvertime && !dayBal.isOverAllowance && (
+                  <p className="text-lg sm:text-xl font-extrabold text-emerald-900">
+                    {calmWithinLine}
                   </p>
                 )}
+
+                {dayBal.isOverAllowance && (
+                  <p className="text-lg sm:text-xl font-black text-amber-950 flex items-center justify-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+                    <span>{dailyOverLine}</span>
+                  </p>
+                )}
+
+                {(screen.isBigOvertime || isDailyBigOvertime) && (
+                  <p className="text-xl sm:text-2xl font-black text-amber-950 pt-1">
+                    {bigOverSupervisorLine}
+                  </p>
+                )}
+
+                <p className="text-base sm:text-lg font-bold text-[#5C5A85] pt-1">
+                  Breaks left today: {screen.breaksLeft}
+                </p>
               </div>
-            )}
 
-            {/* Breaks left today */}
-            <div className="p-4 rounded-2xl bg-white border-2 border-black/10 inline-block px-8">
-              <p className="text-xl sm:text-2xl font-black text-[#171262]">
-                Breaks left today: {screen.breaksLeft}
-              </p>
-            </div>
-
-            {/* Big OK Button */}
-            <div>
-              <button
-                type="button"
-                onClick={goHome}
-                className="w-full min-h-[68px] py-4 px-8 rounded-2xl bg-[#251B7C] hover:bg-[#171262] text-white font-black text-2xl shadow-md cursor-pointer"
-              >
-                OK ({tenSecCountdown}s)
-              </button>
-            </div>
-
-            {/* Small "Tell my supervisor" button with 3 big options */}
-            <div className="pt-2">
-              {reviewSubmitted ? (
-                <div className="p-4 rounded-2xl bg-white border-2 border-emerald-500 font-extrabold text-lg inline-flex items-center gap-2 text-emerald-900">
-                  <Check className="w-6 h-6" />
-                  <span>Note sent to supervisor. Thank you!</span>
-                </div>
-              ) : !reviewDrawerOpen ? (
+              {/* Big OK Button */}
+              <div>
                 <button
                   type="button"
-                  onClick={() => setReviewDrawerOpen(true)}
-                  className="min-h-[64px] px-6 py-3 rounded-2xl bg-white hover:bg-slate-100 text-[#171262] border-2 border-slate-300 font-extrabold text-lg inline-flex items-center gap-2 cursor-pointer"
+                  onClick={goHome}
+                  className="w-full min-h-[68px] py-4 px-8 rounded-2xl bg-[#251B7C] hover:bg-[#171262] text-white font-black text-2xl shadow-md cursor-pointer"
                 >
-                  <Flag className="w-5 h-5 text-[#4D3FDC]" />
-                  <span>Tell my supervisor</span>
+                  OK ({tenSecCountdown}s)
                 </button>
-              ) : (
-                <div className="p-5 rounded-2xl bg-white border-2 border-[#4D3FDC] space-y-3 text-left">
-                  <p className="text-lg font-black text-[#171262] text-center">
-                    Tell my supervisor:
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {(['Supervisor asked me to stay', 'I forgot to stop earlier', 'Other'] as const).map(
-                      (reason) => (
-                        <button
-                          key={reason}
-                          type="button"
-                          onClick={() => {
-                            onFlagLogForReview(screen.completedLog.id, reason);
-                            setReviewSubmitted(true);
-                            setReviewDrawerOpen(false);
-                          }}
-                          className="min-h-[64px] p-4 rounded-2xl bg-[#F8F9FE] hover:bg-[#4D3FDC] hover:text-white text-[#171262] border-2 border-[#C7C2F5] font-extrabold text-lg cursor-pointer transition motion-reduce:transition-none"
-                        >
-                          {reason}
-                        </button>
-                      )
-                    )}
+              </div>
+
+              {/* Small "Tell my supervisor" button with 3 big options */}
+              <div className="pt-2">
+                {reviewSubmitted ? (
+                  <div className="p-4 rounded-2xl bg-white border-2 border-emerald-500 font-extrabold text-lg inline-flex items-center gap-2 text-emerald-900">
+                    <Check className="w-6 h-6" />
+                    <span>Note sent to supervisor. Thank you!</span>
                   </div>
-                </div>
-              )}
+                ) : !reviewDrawerOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setReviewDrawerOpen(true)}
+                    className="min-h-[64px] px-6 py-3 rounded-2xl bg-white hover:bg-slate-100 text-[#171262] border-2 border-slate-300 font-extrabold text-lg inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <Flag className="w-5 h-5 text-[#4D3FDC]" />
+                    <span>Tell my supervisor</span>
+                  </button>
+                ) : (
+                  <div className="p-5 rounded-2xl bg-white border-2 border-[#4D3FDC] space-y-3 text-left">
+                    <p className="text-lg font-black text-[#171262] text-center">
+                      Tell my supervisor:
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {(['Supervisor asked me to stay', 'I forgot to stop earlier', 'Other'] as const).map(
+                        (reason) => (
+                          <button
+                            key={reason}
+                            type="button"
+                            onClick={() => {
+                              onFlagLogForReview(screen.completedLog.id, reason);
+                              setReviewSubmitted(true);
+                              setReviewDrawerOpen(false);
+                            }}
+                            className="min-h-[64px] p-4 rounded-2xl bg-[#F8F9FE] hover:bg-[#4D3FDC] hover:text-white text-[#171262] border-2 border-[#C7C2F5] font-extrabold text-lg cursor-pointer transition motion-reduce:transition-none"
+                          >
+                            {reason}
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
-      {/* ================= MODAL: CANCEL BREAK BY MISTAKE (DIRECT KIOSK ACTION) ================= */}
+      {/* ================= MODAL: CANCEL BREAK BY MISTAKE (REQUIRES UNLOCK CODE "0000" FOR ALL USERS) ================= */}
       {cancelBreakModal && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -1401,7 +1601,7 @@ export default function EmployeeKiosk({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <RotateCcw className="w-6 h-6 text-rose-600" />
-                <h3 className="text-xl font-black text-[#171262]">Cancel Break</h3>
+                <h3 className="text-xl font-black text-[#171262]">Cancel Break (Unlock Code Required)</h3>
               </div>
               <button
                 type="button"
@@ -1421,37 +1621,57 @@ export default function EmployeeKiosk({
                 Cancel running break for {cancelBreakModal.staffName}?
               </p>
               <p className="text-sm font-bold text-rose-800">
-                Confirm below if this break was started by mistake. The break slot will be reset so it can be taken later.
+                Enter the unlock code <strong>0000</strong> to cancel this accidentally started break. It will not appear on any report and {cancelBreakModal.staffName} can take this break later.
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setCancelBreakModal(null);
-                  setCancelPinInput('');
-                  setCancelPinError('');
-                }}
-                className="min-h-[64px] rounded-2xl border-2 border-slate-300 font-extrabold text-lg cursor-pointer"
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const targetBreak = cancelBreakModal;
-                  setCancelBreakModal(null);
-                  setCancelPinInput('');
-                  setCancelPinError('');
-                  onVoidBreakFromKiosk(targetBreak);
-                  goHome();
-                }}
-                className="min-h-[64px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-lg cursor-pointer"
-              >
-                Cancel Break
-              </button>
-            </div>
+            <form onSubmit={handleVerifyCancelBreakPin} className="space-y-4">
+              <div>
+                <label className="block text-sm font-black text-[#171262] mb-1.5">
+                  Enter Unlock Code
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  autoFocus
+                  required
+                  value={cancelPinInput}
+                  onChange={(e) => {
+                    setCancelPinInput(e.target.value);
+                    setCancelPinError('');
+                  }}
+                  placeholder="Enter unlock code..."
+                  className="w-full min-h-[56px] px-4 py-3 rounded-2xl border-2 border-[#C7C2F5] bg-[#F8F9FE] text-center font-mono font-black text-2xl tracking-widest text-[#171262] focus:outline-none focus:ring-2 focus:ring-rose-500"
+                />
+                {cancelPinError && (
+                  <p className="text-sm font-black text-rose-600 mt-2 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{cancelPinError}</span>
+                  </p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCancelBreakModal(null);
+                    setCancelPinInput('');
+                    setCancelPinError('');
+                  }}
+                  className="min-h-[64px] rounded-2xl border-2 border-slate-300 font-extrabold text-lg cursor-pointer"
+                >
+                  Back
+                </button>
+                <button
+                  type="submit"
+                  disabled={verifyingCancelPin}
+                  className="min-h-[64px] rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-black text-lg cursor-pointer"
+                >
+                  {verifyingCancelPin ? 'Checking...' : 'Cancel Break'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

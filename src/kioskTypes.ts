@@ -40,6 +40,14 @@ export interface KioskSettings {
     Morning?: number;
     Night?: number;
   };
+  dailyAllowanceMins?: {
+    Morning: number;
+    Night: number;
+  };
+  showLiveBalanceOnBreak?: boolean;
+  calmWithinAllowanceMessage?: string;
+  dailyOverAllowanceMessage?: string;
+  bigOvertimeSupervisorMessage?: string;
   warningMins: number;
   graceMins: number;
   bigOvertimeMins: number;
@@ -103,6 +111,16 @@ export const DEFAULT_KIOSK_SETTINGS: KioskSettings = {
   shiftBreaks: DEFAULT_SHIFT_BREAKS,
   shiftTimings: DEFAULT_SHIFT_TIMINGS,
   shiftRefillTimestamps: { Morning: 0, Night: 0 },
+  dailyAllowanceMins: {
+    Morning: 60,
+    Night: 60,
+  },
+  showLiveBalanceOnBreak: true,
+  calmWithinAllowanceMessage:
+    'Please try to return on time. Your day total is still within your break time.',
+  dailyOverAllowanceMessage:
+    'Your breaks today are N min over your daily break time.',
+  bigOvertimeSupervisorMessage: 'Please talk to your supervisor.',
   warningMins: 5,
   graceMins: 1,
   bigOvertimeMins: 15,
@@ -288,6 +306,103 @@ export function getShiftTotalBreakMins(settings: KioskSettings | undefined, shif
 }
 
 /**
+ * Returns the Daily Break Allowance (minutes) per shift day.
+ * Default = sum of the 3 break minutes of that shift (normally 60), or any whole number 1 to 480 configured in Settings.
+ */
+export function getShiftDailyAllowanceMins(
+  settings: KioskSettings | undefined,
+  shift: 'Morning' | 'Night'
+): number {
+  const raw = settings?.dailyAllowanceMins?.[shift];
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 1 && n <= 480) {
+    return Math.round(n);
+  }
+  return getShiftTotalBreakMins(settings, shift);
+}
+
+/**
+ * Returns the counted minutes for a single completed break log.
+ * Excludes voided, deleted, and test-mode logs (returns 0).
+ * Respects supervisor fix rules such as "Supervisor Forgot" (which caps at allottedMins unless custom adjusted).
+ */
+export function getCountedMins(log: SyncableBreakLog, settings?: KioskSettings): number {
+  if (!log || log.voided || log.deleted || log.testMode) return 0;
+  const rawDur = Math.max(0, Math.round(Number(log.durationMins) || 0));
+  if (log.exceptionReason === 'Supervisor Forgot') {
+    const slots = getShiftBreakSlots(settings, log.shift);
+    const slot = resolveBreakSlot(log.breakType, log.breakSlot, settings);
+    const allotted = Number(log.allottedMins) > 0 ? Number(log.allottedMins) : slot ? slots[slot - 1].mins : slots[0].mins;
+    return Math.min(rawDur, allotted);
+  }
+  return rawDur;
+}
+
+/**
+ * 6-Month Retention Cutoff (~185 days):
+ * Daily reports and Monthly reports are smoothly retained for up to 6 months.
+ * Any log older than 6 months is automatically deleted from local storage and Firebase Firestore.
+ */
+export const SIX_MONTH_RETENTION_DAYS = 185;
+
+export function getSixMonthCutoffDateStr(now: Date = new Date(), settings?: KioskSettings): string {
+  const cutoffMs = now.getTime() - SIX_MONTH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return getDubaiTimeInfo(new Date(cutoffMs), settings).dateStr;
+}
+
+export function isLogOlderThanSixMonths(log: SyncableBreakLog, now: Date = new Date()): boolean {
+  if (!log) return true;
+  const cutoffDateStr = getSixMonthCutoffDateStr(now);
+  const cutoffMs = now.getTime() - SIX_MONTH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+  if (log.date && /^\d{4}-\d{2}-\d{2}$/.test(log.date)) {
+    if (log.date < cutoffDateStr) return true;
+  }
+  const ts = Date.parse(log.endTime || log.startTime || '');
+  if (Number.isFinite(ts) && ts < cutoffMs) {
+    return true;
+  }
+  return false;
+}
+
+export function pruneLogsOlderThanSixMonths<T extends SyncableBreakLog>(
+  logs: T[],
+  now: Date = new Date()
+): { keptLogs: T[]; prunedIds: string[]; retainedLogs: T[]; expiredLogIds: string[] } {
+  const keptLogs: T[] = [];
+  const prunedIds: string[] = [];
+  for (const l of logs || []) {
+    if (!l || !l.id) continue;
+    if (isLogOlderThanSixMonths(l, now)) {
+      prunedIds.push(l.id);
+    } else {
+      keptLogs.push(l);
+    }
+  }
+  return { keptLogs, prunedIds, retainedLogs: keptLogs, expiredLogIds: prunedIds };
+}
+
+export function getLastSixMonthsOptions(
+  now: Date = new Date(),
+  settings?: KioskSettings
+): { value: string; label: string }[] {
+  const info = getDubaiTimeInfo(now, settings);
+  const [yStr, mStr] = info.dateStr.split('-');
+  const baseYear = parseInt(yStr, 10);
+  const baseMonth = parseInt(mStr, 10) - 1; // 0-indexed
+  const options: { value: string; label: string }[] = [];
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(baseYear, baseMonth - i, 1);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const val = `${yyyy}-${mm}`;
+    const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    options.push({ value: val, label });
+  }
+  return options;
+}
+
+/**
  * Calculates an employee's monthly entitled break minutes across 26 working shifts:
  * - For every break that WAS taken (non-voided, non-testMode), uses that log's own saved `allottedMins`
  *   so past logs are never altered when settings change later.
@@ -437,9 +552,13 @@ export function mergeState(base: Partial<AppSyncState>, incoming: Partial<AppSyn
       }
     }
   });
-  const logs = Array.from(logMap.values()).sort((a, b) =>
+  const allMergedLogs = Array.from(logMap.values()).sort((a, b) =>
     String(b.endTime || '').localeCompare(String(a.endTime || ''))
   );
+  // Auto-delete logs older than 6 months (>185 days)
+  const { keptLogs: logs, prunedIds } = pruneLogsOlderThanSixMonths(allMergedLogs);
+  prunedIds.forEach((id) => deletedSet.add(id));
+  const finalDeletedLogs = Array.from(deletedSet);
 
   // 3. Determine closed active breaks (closed by either normal or voided log)
   const closedBreakIds = new Set<string>([
@@ -553,9 +672,9 @@ export function mergeState(base: Partial<AppSyncState>, incoming: Partial<AppSyn
     staff,
     activeBreaks,
     logs,
-    deletedLogs,
+    deletedLogs: finalDeletedLogs.slice(-1000),
     deletedStaff,
-    closedBreakIds: Array.from(closedBreakIds).slice(-300),
+    closedBreakIds: Array.from(closedBreakIds).slice(-500),
     kioskSettings,
     isDefaultPin: incoming.isDefaultPin ?? base.isDefaultPin,
   };
@@ -767,6 +886,276 @@ export function isLogInCurrentShiftCycle(
     }
   }
   return log.date === currentNightCycle;
+}
+
+/**
+ * Returns the operational shiftDate (YYYY-MM-DD) for a given shift and timestamp.
+ * Rule: A Night Shift after midnight (00:00 to 11:59 AM Dubai time) belongs to the date the shift started (previous evening).
+ * Morning Shift belongs to the Dubai calendar date (or Morning cycle date).
+ */
+export function getShiftDateForTimestamp(
+  shift: 'Morning' | 'Night',
+  dateOrIso: Date | string = new Date(),
+  settings?: KioskSettings
+): string {
+  const dateObj = typeof dateOrIso === 'string' ? new Date(dateOrIso) : dateOrIso;
+  if (Number.isNaN(dateObj.getTime())) {
+    return getDubaiTimeInfo(new Date(), settings).dateStr;
+  }
+  if (shift === 'Morning') {
+    return getMorningShiftCycleDateStr(dateObj, settings);
+  }
+  // Night shift: any time after midnight before noon (00:00 - 11:59 AM Dubai time) belongs to the date the Night shift started
+  const info = getDubaiTimeInfo(dateObj, settings);
+  if (info.hour < 12) {
+    const prevDay = new Date(dateObj.getTime() - (info.hour * 60 + info.minute + 120) * 60 * 1000);
+    return getDubaiTimeInfo(prevDay, settings).dateStr;
+  }
+  return info.dateStr;
+}
+
+/**
+ * Returns the current shiftDate (YYYY-MM-DD) for a shift right now.
+ */
+export function getCurrentShiftDate(
+  shift: 'Morning' | 'Night',
+  now: Date = new Date(),
+  settings?: KioskSettings
+): string {
+  return getShiftDateForTimestamp(shift, now, settings);
+}
+
+/**
+ * Determines the shiftDate (YYYY-MM-DD) that a completed BreakLog belongs to.
+ * A Night Shift log recorded after midnight belongs to the date the shift started.
+ */
+export function getLogShiftDate(
+  log: { shift: 'Morning' | 'Night'; date?: string; startTime?: string; endTime?: string },
+  settings?: KioskSettings
+): string {
+  const rawTs = log.startTime || log.endTime;
+  if (log.shift === 'Night' && rawTs) {
+    const parsedMs = Date.parse(rawTs);
+    if (Number.isFinite(parsedMs)) {
+      const d = new Date(parsedMs);
+      const info = getDubaiTimeInfo(d, settings);
+      // If log was recorded after midnight (00:00 - 11:59 AM) and log.date was stamped with the post-midnight date,
+      // attribute it to the evening date the Night Shift started.
+      if (info.hour < 12) {
+        const prevDateStr = getShiftDateForTimestamp('Night', d, settings);
+        if (!log.date || log.date === info.dateStr) {
+          return prevDateStr;
+        }
+      }
+    }
+  }
+  if (log.date && /^\d{4}-\d{2}-\d{2}$/.test(log.date)) {
+    return log.date;
+  }
+  if (rawTs) {
+    return getShiftDateForTimestamp(log.shift, rawTs, settings);
+  }
+  return getDubaiTimeInfo(new Date(), settings).dateStr;
+}
+
+export interface DailyBalanceResult {
+  staffId: string;
+  shift: 'Morning' | 'Night';
+  shiftDate: string;
+  allowanceMins: number;
+  usedMins: number;
+  balanceMins: number;
+  remainingMins: number;
+  overtimeMins: number;
+  savedMins: number;
+  isOverAllowance: boolean;
+  isZeroBalance: boolean;
+  isLowBalance: boolean;
+  activeElapsedMins: number;
+  liveUsedMins: number;
+  liveBalanceMins: number;
+  liveRemainingMins: number;
+  liveOverMins: number;
+  liveOvertimeMins: number;
+  isLiveOverAllowance: boolean;
+  progressPct: number;
+  dayLogsCount: number;
+}
+
+/**
+ * SINGLE PURE FUNCTION for calculating Daily Break Balance, Daily Overtime, and Live Running Balance.
+ * Used across the Employee Kiosk, Supervisor Dashboard, Daily Summary, and Monthly Report with zero duplicated formulas.
+ *
+ * Rules:
+ * - DAILY ALLOWANCE = configured dailyAllowanceMins[shift] (1..480) or sum of the 3 shift breaks (normally 60).
+ * - DAILY BALANCE = allowanceMins - usedMins (sum of countedMins of completed logs for shiftDate, excluding voided/deleted/testMode).
+ * - DAILY OVERTIME = max(0, usedMins - allowanceMins). A single break that runs longer than its own slot is NOT overtime in reports as long as the day total stays within the allowance.
+ * - LIVE BALANCE (during an active break) = balanceMins - elapsedWholeMins(activeBreak).
+ */
+export function getDailyBalance(
+  staffId: string,
+  shiftDate: string,
+  logs: SyncableBreakLog[],
+  activeBreak?: SyncableActiveBreak | null,
+  now: Date = new Date(),
+  settings?: KioskSettings,
+  staffShift?: 'Morning' | 'Night'
+): DailyBalanceResult {
+  const shift: 'Morning' | 'Night' =
+    staffShift ||
+    activeBreak?.shift ||
+    logs.find((l) => l.staffId === staffId)?.shift ||
+    getDubaiTimeInfo(now, settings).autoShift;
+
+  const resolvedShiftDate = shiftDate || getCurrentShiftDate(shift, now, settings);
+  const currentShiftDateForNow = getCurrentShiftDate(shift, now, settings);
+  const refillTs =
+    resolvedShiftDate === currentShiftDateForNow
+      ? Number(settings?.shiftRefillTimestamps?.[shift] || 0)
+      : 0;
+
+  const allowanceMins = getShiftDailyAllowanceMins(settings, shift);
+
+  const dayLogs = (logs || []).filter((l) => {
+    if (!l || l.staffId !== staffId) return false;
+    if (l.voided || l.deleted || l.testMode) return false;
+    if (refillTs > 0) {
+      const logTimeMs = Date.parse(l.endTime || l.startTime || '');
+      if (Number.isFinite(logTimeMs) && logTimeMs < refillTs) return false;
+    }
+    return getLogShiftDate(l, settings) === resolvedShiftDate;
+  });
+
+  const usedMins = dayLogs.reduce((sum, l) => sum + getCountedMins(l, settings), 0);
+  const balanceMins = allowanceMins - usedMins;
+  const remainingMins = Math.max(0, balanceMins);
+  const overtimeMins = Math.max(0, usedMins - allowanceMins);
+  const savedMins = Math.max(0, allowanceMins - usedMins);
+
+  const isOverAllowance = usedMins > allowanceMins;
+  const isZeroBalance = balanceMins === 0;
+  const isLowBalance = balanceMins >= 0 && balanceMins < 10;
+
+  let activeElapsedMins = 0;
+  if (activeBreak && activeBreak.staffId === staffId && !activeBreak.testMode) {
+    const startMs = Date.parse(activeBreak.startTime);
+    if (Number.isFinite(startMs)) {
+      const elapsedSecs = Math.max(0, Math.floor((now.getTime() - startMs) / 1000));
+      activeElapsedMins = Math.floor(elapsedSecs / 60);
+    }
+  }
+
+  const liveUsedMins = usedMins + activeElapsedMins;
+  const liveBalanceMins = allowanceMins - liveUsedMins;
+  const liveRemainingMins = Math.max(0, liveBalanceMins);
+  const liveOverMins = Math.max(0, liveUsedMins - allowanceMins);
+  const isLiveOverAllowance = liveBalanceMins < 0;
+
+  const progressPct =
+    allowanceMins > 0 ? Math.min(100, Math.max(0, Math.round((usedMins / allowanceMins) * 100))) : 0;
+
+  return {
+    staffId,
+    shift,
+    shiftDate: resolvedShiftDate,
+    allowanceMins,
+    usedMins,
+    balanceMins,
+    remainingMins,
+    overtimeMins,
+    savedMins,
+    isOverAllowance,
+    isZeroBalance,
+    isLowBalance,
+    activeElapsedMins,
+    liveUsedMins,
+    liveBalanceMins,
+    liveRemainingMins,
+    liveOverMins,
+    liveOvertimeMins: liveOverMins,
+    isLiveOverAllowance,
+    progressPct,
+    dayLogsCount: dayLogs.length,
+  };
+}
+
+export interface EmployeeMonthlyReportMetrics {
+  staffId: string;
+  shift: 'Morning' | 'Night';
+  daysPresent: number;
+  breaksCount: number;
+  dailyAllowanceMins: number;
+  entitledMins: number;      // daysPresent * dailyAllowanceMins
+  usedMins: number;          // sum of countedMins across all days present
+  differenceMins: number;    // entitledMins - usedMins
+  netVarianceMins: number;   // usedMins - entitledMins
+  overtimeMins: number;      // sum of daily overtime (max(0, dayUsed - dailyAllowance))
+  daysOverAllowance: number; // number of days where dayUsed > dailyAllowance
+  savedMins: number;         // sum of daily unused balance (max(0, dailyAllowance - dayUsed)) for days present
+}
+
+/**
+ * Computes an employee's Monthly Report metrics for a given YYYY-MM month using ONLY getDailyBalance
+ * across each shiftDate present in that month (no stored balance fields, works on all existing logs).
+ */
+export function calculateEmployeeMonthlyReport(
+  staffId: string,
+  shift: 'Morning' | 'Night',
+  monthPrefix: string,
+  logs: SyncableBreakLog[],
+  settings?: KioskSettings
+): EmployeeMonthlyReportMetrics {
+  const dailyAllowanceMins = getShiftDailyAllowanceMins(settings, shift);
+  const presentDatesSet = new Set<string>();
+  let breaksCount = 0;
+
+  for (const l of logs || []) {
+    if (!l || l.staffId !== staffId) continue;
+    if (l.voided || l.deleted || l.testMode) continue;
+    const sDate = getLogShiftDate(l, settings);
+    if (sDate.startsWith(monthPrefix)) {
+      presentDatesSet.add(sDate);
+      breaksCount += 1;
+    }
+  }
+
+  const presentDates = Array.from(presentDatesSet).sort();
+  const daysPresent = presentDates.length;
+
+  let entitledMins = 0;
+  let usedMins = 0;
+  let overtimeMins = 0;
+  let daysOverAllowance = 0;
+  let savedMins = 0;
+
+  for (const sDate of presentDates) {
+    const dayBal = getDailyBalance(staffId, sDate, logs, null, new Date(), settings, shift);
+    entitledMins += dayBal.allowanceMins;
+    usedMins += dayBal.usedMins;
+    overtimeMins += dayBal.overtimeMins;
+    if (dayBal.isOverAllowance) {
+      daysOverAllowance += 1;
+    }
+    savedMins += dayBal.savedMins;
+  }
+
+  const differenceMins = entitledMins - usedMins;
+  const netVarianceMins = usedMins - entitledMins;
+
+  return {
+    staffId,
+    shift,
+    daysPresent,
+    breaksCount,
+    dailyAllowanceMins,
+    entitledMins,
+    usedMins,
+    differenceMins,
+    netVarianceMins,
+    overtimeMins,
+    daysOverAllowance,
+    savedMins,
+  };
 }
 
 export function formatDubaiTimeShort(isoOrDate: string | Date): string {
