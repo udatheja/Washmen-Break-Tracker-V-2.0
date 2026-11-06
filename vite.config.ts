@@ -11,10 +11,18 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     base: './',
+    define: {
+      'process.env.NODE_ENV': JSON.stringify('production'),
+    },
     plugins: [react(), tailwindcss()],
+    build: {
+      minify: true,
+      cssMinify: true,
+      sourcemap: false,
+    },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

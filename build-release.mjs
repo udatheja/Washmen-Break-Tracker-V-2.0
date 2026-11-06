@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import esbuild from 'esbuild';
 
 const viteEntryHtml = `<!doctype html>
 <html lang="en">
@@ -16,7 +17,10 @@ const viteEntryHtml = `<!doctype html>
 </html>`;
 
 fs.writeFileSync('index.html', viteEntryHtml, 'utf8');
-execSync('npx vite build', { stdio: 'inherit' });
+execSync('npx vite build', {
+  stdio: 'inherit',
+  env: { ...process.env, NODE_ENV: 'production' },
+});
 
 const assetsDir = path.join('dist', 'assets');
 const files = fs.readdirSync(assetsDir);
@@ -28,16 +32,20 @@ if (!cssFile || !jsFile) {
   process.exit(1);
 }
 
-const cssContent = fs
-  .readFileSync(path.join(assetsDir, cssFile), 'utf8')
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/\/\/# sourceMappingURL=.*/g, '')
-  .trim();
+const rawCss = fs.readFileSync(path.join(assetsDir, cssFile), 'utf8');
+const cssContent = esbuild
+  .transformSync(rawCss, { loader: 'css', minify: true })
+  .code.trim();
 
-const jsContent = fs
-  .readFileSync(path.join(assetsDir, jsFile), 'utf8')
-  .replace(/\/\/# sourceMappingURL=.*/g, '')
-  .trim();
+const rawJs = fs.readFileSync(path.join(assetsDir, jsFile), 'utf8');
+const jsContent = esbuild
+  .transformSync(rawJs, {
+    loader: 'js',
+    minify: true,
+    legalComments: 'none',
+     define: { 'process.env.NODE_ENV': '"production"' },
+  })
+  .code.trim();
 
 const jsBase64 = Buffer.from(jsContent, 'utf8').toString('base64');
 const buildVersion = Date.now().toString(36);
@@ -127,16 +135,11 @@ const singleFileHtml = `<!doctype html>
 </html>`;
 
 fs.writeFileSync('index.html', singleFileHtml, 'utf8');
-fs.writeFileSync('404.html', singleFileHtml, 'utf8');
-fs.writeFileSync('washmen-break-tracker.html', singleFileHtml, 'utf8');
-if (!fs.existsSync('public')) fs.mkdirSync('public', { recursive: true });
-fs.writeFileSync(path.join('public', 'washmen-break-tracker.html'), singleFileHtml, 'utf8');
 fs.writeFileSync(path.join('dist', 'index.html'), singleFileHtml, 'utf8');
-fs.writeFileSync(path.join('dist', '404.html'), singleFileHtml, 'utf8');
-fs.writeFileSync(path.join('dist', 'washmen-break-tracker.html'), singleFileHtml, 'utf8');
 
 console.log('Built self-contained single-file release successfully:', {
   buildVersion,
+  totalHtmlBytes: Buffer.byteLength(singleFileHtml, 'utf8'),
   cssBytes: cssContent.length,
   jsBase64Bytes: jsBase64.length,
 });
