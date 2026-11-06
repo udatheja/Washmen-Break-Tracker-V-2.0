@@ -67,6 +67,11 @@ const singleFileHtml = `<!doctype html>
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex, noai, noimageai" />
+    <meta name="googlebot" content="noindex, nofollow, noarchive, nosnippet, noimageindex" />
+    <meta name="bingbot" content="noindex, nofollow, noarchive, nosnippet" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -151,6 +156,12 @@ const singleFileHtml = `<!doctype html>
 
 fs.writeFileSync('index.html', singleFileHtml, 'utf8');
 fs.writeFileSync(path.join('dist', 'index.html'), singleFileHtml, 'utf8');
+
+if (fs.existsSync(path.join('public', 'robots.txt'))) {
+  const robotsTxt = fs.readFileSync(path.join('public', 'robots.txt'), 'utf8');
+  fs.writeFileSync('robots.txt', robotsTxt, 'utf8');
+  fs.writeFileSync(path.join('dist', 'robots.txt'), robotsTxt, 'utf8');
+}
 
 console.log('Built self-contained single-file release successfully:', {
   buildVersion,

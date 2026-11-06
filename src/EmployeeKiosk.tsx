@@ -44,7 +44,10 @@ import {
   attachSafeCreditWatchdog,
   WASHMEN_LOGO_FALLBACK,
   getWashmenLogoSrc,
-  toggleAndroidFullscreen
+  toggleAndroidFullscreen,
+  checkAuthRateLimit,
+  recordAuthFailure,
+  resetAuthRateLimit
 } from './kioskTypes';
 
 // Embedded character-code sequence for Udara Fernando
@@ -206,16 +209,31 @@ export default function EmployeeKiosk({
   // Auto-return timers: 30s inactivity on sub-screens, 10s on Screen 3 (Break Started) and Screen 4 Result
   const [idleSecondsLeft, setIdleSecondsLeft] = useState<number>(kioskSettings.autoReturnSecs || 30);
   const [tenSecCountdown, setTenSecCountdown] = useState<number>(10);
+  const sharedAudioCtxRef = useRef<AudioContext | null>(null);
+  const lastInteractionTsRef = useRef<number>(0);
+
+  const getOrCreateAudioContext = useCallback((): AudioContext | null => {
+    try {
+      if (sharedAudioCtxRef.current && sharedAudioCtxRef.current.state !== 'closed') {
+        return sharedAudioCtxRef.current;
+      }
+      const AudioCtx =
+        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        sharedAudioCtxRef.current = new AudioCtx();
+        return sharedAudioCtxRef.current;
+      }
+    } catch {}
+    return null;
+  }, []);
 
   // Unlock soft audio automatically on the first touch/click/keydown anywhere
   const unlockAudioSilently = useCallback(() => {
     if (audioUnlockedRef.current) return;
     audioUnlockedRef.current = true;
     try {
-      const AudioCtx =
-        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (AudioCtx) {
-        const ctx = new AudioCtx();
+      const ctx = getOrCreateAudioContext();
+      if (ctx) {
         if (ctx.state === 'suspended') {
           ctx.resume().catch(() => {});
         }
@@ -230,24 +248,27 @@ export default function EmployeeKiosk({
     } catch {
       // Ignore audio errors
     }
-  }, []);
+  }, [getOrCreateAudioContext]);
 
-  // Reset idle timers on any user touch or interaction
+  // Reset idle timers on any user touch or interaction (throttled to avoid scroll/touch re-render storms)
   const handleUserInteraction = useCallback(() => {
     unlockAudioSilently();
-    setIdleSecondsLeft(kioskSettings.autoReturnSecs || 30);
+    const nowMs = Date.now();
+    if (nowMs - lastInteractionTsRef.current < 1500) return;
+    lastInteractionTsRef.current = nowMs;
+    if (screen.view !== 'home' || searchQuery.trim().length > 0) {
+      setIdleSecondsLeft(kioskSettings.autoReturnSecs || 30);
+    }
     if (screen.view === 'startedSuccess' || screen.view === 'resultScreen') {
       setTenSecCountdown(10);
     }
-  }, [unlockAudioSilently, kioskSettings.autoReturnSecs, screen.view]);
+  }, [unlockAudioSilently, kioskSettings.autoReturnSecs, screen.view, searchQuery]);
 
-  // Attach passive touch and scroll listeners so Chrome Android scrolling is never blocked
+  // Attach passive touchstart listener (no scroll listener so scrolling never triggers React re-renders)
   useEffect(() => {
     window.addEventListener('touchstart', handleUserInteraction, { passive: true });
-    window.addEventListener('scroll', handleUserInteraction, { passive: true });
     return () => {
       window.removeEventListener('touchstart', handleUserInteraction);
-      window.removeEventListener('scroll', handleUserInteraction);
     };
   }, [handleUserInteraction]);
 
@@ -271,9 +292,20 @@ export default function EmployeeKiosk({
     setTenSecCountdown(10);
   }, [kioskSettings.autoReturnSecs]);
 
-  // 1-second clock & auto-return ticker
+  // Adaptive clock & auto-return ticker (pauses when tab is hidden; ticks every 10s when idle with 0 active breaks, or 1s when active breaks/sub-screens are shown)
+  const hasActiveBreaks = activeBreaks.length > 0;
   useEffect(() => {
+    const isIdleHome =
+      screen.view === 'home' &&
+      !searchQuery.trim() &&
+      !hasActiveBreaks &&
+      !cancelBreakModal &&
+      !supervisorModalOpen &&
+      !windowPinModal;
+    const intervalMs = isIdleHome ? 10000 : 1000;
+
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       setNow(new Date());
 
       // 10-second auto-return on Screen 3 (Break Started) and Screen 4 (Result Screen)
@@ -289,19 +321,30 @@ export default function EmployeeKiosk({
       }
 
       // 30-second auto-return on any non-home state or active search (paused while any PIN modal is open)
-      setIdleSecondsLeft((prev) => {
-        if ((screen.view === 'home' && !searchQuery.trim()) || cancelBreakModal || supervisorModalOpen || windowPinModal) {
-          return kioskSettings.autoReturnSecs || 30;
-        }
-        if (prev <= 1) {
-          goHome();
-          return kioskSettings.autoReturnSecs || 30;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+      if (!isIdleHome) {
+        setIdleSecondsLeft((prev) => {
+          if ((screen.view === 'home' && !searchQuery.trim()) || cancelBreakModal || supervisorModalOpen || windowPinModal) {
+            return kioskSettings.autoReturnSecs || 30;
+          }
+          if (prev <= 1) {
+            goHome();
+            return kioskSettings.autoReturnSecs || 30;
+          }
+          return prev - 1;
+        });
+      }
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, [screen.view, searchQuery, kioskSettings.autoReturnSecs, goHome, cancelBreakModal, supervisorModalOpen, windowPinModal]);
+  }, [
+    screen.view,
+    searchQuery,
+    hasActiveBreaks,
+    kioskSettings.autoReturnSecs,
+    goHome,
+    cancelBreakModal,
+    supervisorModalOpen,
+    windowPinModal,
+  ]);
 
   // Screen Wake Lock API to keep tablet awake
   useEffect(() => {
@@ -321,6 +364,7 @@ export default function EmployeeKiosk({
     requestWakeLock();
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
+        setNow(new Date());
         requestWakeLock();
       }
     };
@@ -333,14 +377,16 @@ export default function EmployeeKiosk({
     };
   }, []);
 
-  // Soft audio chime player (soft and optional in Settings)
+  // Soft audio chime player reusing single shared AudioContext
   const playChime = useCallback(
     (kind: 'twoMin' | 'overtime' | 'success') => {
       if (!kioskSettings.soundEnabled || !audioUnlockedRef.current) return;
       try {
-        const AudioCtx =
-          window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        const ctx = new AudioCtx();
+        const ctx = getOrCreateAudioContext();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
@@ -376,7 +422,7 @@ export default function EmployeeKiosk({
         // Ignore audio errors
       }
     },
-    [kioskSettings.soundEnabled]
+    [kioskSettings.soundEnabled, getOrCreateAudioContext]
   );
 
   // Elapsed seconds for an active break (fixed 1x real-time multiplier everywhere)
@@ -592,30 +638,47 @@ export default function EmployeeKiosk({
     });
   };
 
-  // Verify Supervisor PIN on the server
+  // Verify Supervisor PIN on the server (with brute-force rate limit)
   const handleVerifySupervisorPin = async (e: React.FormEvent) => {
     e.preventDefault();
+    const rate = checkAuthRateLimit('kiosk_pin');
+    if (rate.locked) {
+      setExitPinError(`Too many wrong attempts. Please wait ${rate.remainingSecs}s.`);
+      return;
+    }
     setVerifyingPin(true);
     setExitPinError('');
     const res = await verifyPinOnServer(exitPinInput);
     setVerifyingPin(false);
     if (res.valid) {
+      resetAuthRateLimit('kiosk_pin');
       setSupervisorPinUnlocked(true);
       setExitPinInput('');
     } else {
-      setExitPinError('Wrong PIN. Please try again.');
+      const fail = recordAuthFailure('kiosk_pin');
+      setExitPinError(
+        fail.locked
+          ? `Too many wrong attempts. Locked for ${fail.remainingSecs}s.`
+          : 'Wrong PIN. Please try again.'
+      );
     }
   };
 
-  // Verify PIN to override break time window
+  // Verify PIN to override break time window (with brute-force rate limit)
   const handleVerifyWindowOverridePin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!windowPinModal || screen.view !== 'selectBreak') return;
+    const rate = checkAuthRateLimit('kiosk_pin');
+    if (rate.locked) {
+      setWindowPinError(`Too many wrong attempts. Please wait ${rate.remainingSecs}s.`);
+      return;
+    }
     setVerifyingPin(true);
     setWindowPinError('');
     const res = await verifyPinOnServer(windowPinInput);
     setVerifyingPin(false);
     if (res.valid) {
+      resetAuthRateLimit('kiosk_pin');
       const key = `${screen.employee.id}_${windowPinModal.slotCfg.slot}`;
       setWindowOverriddenBreaks((prev) => new Set(prev).add(key));
       const slotCfg = windowPinModal.slotCfg;
@@ -623,7 +686,12 @@ export default function EmployeeKiosk({
       setWindowPinInput('');
       setScreen({ view: 'confirmStart', employee: screen.employee, slotCfg });
     } else {
-      setWindowPinError('Wrong PIN. Please try again.');
+      const fail = recordAuthFailure('kiosk_pin');
+      setWindowPinError(
+        fail.locked
+          ? `Too many wrong attempts. Locked for ${fail.remainingSecs}s.`
+          : 'Wrong PIN. Please try again.'
+      );
     }
   };
 
@@ -642,6 +710,11 @@ export default function EmployeeKiosk({
   const handleVerifyCancelBreakPin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!cancelBreakModal) return;
+    const rate = checkAuthRateLimit('kiosk_cancel_pin');
+    if (rate.locked) {
+      setCancelPinError(`Too many wrong attempts. Please wait ${rate.remainingSecs}s.`);
+      return;
+    }
     setVerifyingCancelPin(true);
     setCancelPinError('');
     const trimmed = cancelPinInput.trim();
@@ -653,6 +726,7 @@ export default function EmployeeKiosk({
     }
     setVerifyingCancelPin(false);
     if (isValid) {
+      resetAuthRateLimit('kiosk_cancel_pin');
       const targetBreak = cancelBreakModal;
       setCancelBreakModal(null);
       setCancelPinInput('');
@@ -660,7 +734,12 @@ export default function EmployeeKiosk({
       onVoidBreakFromKiosk(targetBreak);
       goHome();
     } else {
-      setCancelPinError('Wrong unlock code. Please enter 0000 to cancel this break.');
+      const fail = recordAuthFailure('kiosk_cancel_pin');
+      setCancelPinError(
+        fail.locked
+          ? `Too many wrong attempts. Locked for ${fail.remainingSecs}s.`
+          : 'Wrong unlock code. Please enter 0000 to cancel this break.'
+      );
     }
   };
 

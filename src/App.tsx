@@ -44,6 +44,7 @@ import {
   pushCloudStationSync,
   pullCloudStationSync,
   subscribeToCloudStationSync,
+  isCloudRealtimeConnected,
   CloudStationSyncPayload,
 } from './firebase';
 import {
@@ -93,6 +94,11 @@ import {
   downloadOrShareFile,
   downloadSelfContainedHtml,
   isLogInCurrentShiftCycle,
+  sanitizeCsvCell,
+  sanitizeImportedBackupJson,
+  checkAuthRateLimit,
+  recordAuthFailure,
+  resetAuthRateLimit,
   getVerifiedDeveloperMetadata,
   attachSafeCreditWatchdog,
   WASHMEN_LOGO_FALLBACK
@@ -415,11 +421,25 @@ export default function App() {
     }, 3500);
   }, []);
 
-  // Sound alert using Web Audio API
+  // Sound alert using a single shared Web Audio API context
+  const appAudioCtxRef = useRef<AudioContext | null>(null);
+  const lastAppliedCloudTsRef = useRef<number>(0);
+
   const playBeep = useCallback(() => {
     if (!soundEnabled) return;
     try {
-      const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      if (!appAudioCtxRef.current || appAudioCtxRef.current.state === 'closed') {
+        const AudioCtx =
+          window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtx) {
+          appAudioCtxRef.current = new AudioCtx();
+        }
+      }
+      const audioCtx = appAudioCtxRef.current;
+      if (!audioCtx) return;
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
       osc.type = 'sine';
@@ -463,6 +483,13 @@ export default function App() {
   // Helper to apply incoming cloud snapshot cleanly as authoritative state into local state & storage
   const applyCloudSnapshotToLocal = useCallback((cloudData: CloudStationSyncPayload) => {
     try {
+      const incomingTs = Number(cloudData.updatedAtMs || 0);
+      if (incomingTs > 0 && incomingTs === lastAppliedCloudTsRef.current) {
+        return;
+      }
+      if (incomingTs > 0) {
+        lastAppliedCloudTsRef.current = incomingTs;
+      }
       hasReceivedCloudSnapshotRef.current = true;
       isStorageHydratedRef.current = true;
 
@@ -539,22 +566,6 @@ export default function App() {
       setDeletedStaff(nextDeletedStaff);
       setClosedBreakIds(nextClosedBreakIds);
       setKioskSettings(nextSettings);
-
-      safeSetStorage(
-        STORAGE_KEY,
-        JSON.stringify({
-          staff: cleanedStaff,
-          activeBreaks: nextActiveBreaks,
-          logs: nextLogs,
-          deletedLogs: nextDeletedLogs,
-          deletedStaff: nextDeletedStaff,
-          closedBreakIds: nextClosedBreakIds,
-          kioskSettings: nextSettings,
-          authAccounts: mergedAccounts,
-        })
-      );
-      safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
-      safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(mergedAccounts));
     } catch (err) {
       console.error('Failed to apply cloud sync snapshot:', err);
     }
@@ -982,10 +993,11 @@ export default function App() {
     );
   }, [devModalOpen]);
 
-  // Listen to online/offline/focus events & storage events across tabs/windows + immediate & 4-second Kiosk/Dashboard cloud pull
+  // Listen to online/offline/focus events & storage events across tabs/windows + fallback poll ONLY when real-time listener is disconnected
   useEffect(() => {
-    // Immediately pull freshest cloud state whenever tab, kiosk mode, or logged-in account changes
-    serverSync();
+    if (!isCloudRealtimeConnected()) {
+      serverSync();
+    }
 
     const handleOnline = () => {
       setIsOffline(false);
@@ -996,7 +1008,10 @@ export default function App() {
     };
     const handleVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
-        serverSync();
+        setCurrentTime(new Date());
+        if (!isCloudRealtimeConnected()) {
+          serverSync();
+        }
       }
     };
     const handleStorage = (e: StorageEvent) => {
@@ -1016,13 +1031,13 @@ export default function App() {
     document.addEventListener('visibilitychange', handleVisibilityOrFocus);
     window.addEventListener('storage', handleStorage);
 
-    // Pull latest server state every 4 seconds in kiosk mode (or every 6 seconds in dashboard mode) alongside real-time onSnapshot
-    const syncInterval = setInterval(
-      () => {
+    // Fallback poll every 30 seconds ONLY when tab is visible AND real-time onSnapshot is disconnected
+    const syncInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (!isCloudRealtimeConnected()) {
         serverSync();
-      },
-      currentTab === 'kiosk' || isKioskLocked ? 4000 : 6000
-    );
+      }
+    }, 30000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
@@ -1032,9 +1047,9 @@ export default function App() {
       window.removeEventListener('storage', handleStorage);
       clearInterval(syncInterval);
     };
-  }, [currentTab, isKioskLocked, loggedInAccount, serverSync]);
+  }, [currentTab, isKioskLocked, loggedInAccount, serverSync, applyCloudSnapshotToLocal]);
 
-  // Clock ticker every second & automatic shift transition 30 minutes before new shift starts
+  // Clock ticker & automatic shift transition 30 minutes before new shift starts
   const lastDetectedAutoShiftRef = useRef<'Morning' | 'Night'>(
     getDubaiTimeInfo(new Date(), kioskSettings).autoShift
   );
@@ -1053,12 +1068,15 @@ export default function App() {
     }
   }, [currentTime, kioskSettings]);
 
+  const hasActiveBreaksForTicker = activeBreaks.length > 0;
   useEffect(() => {
+    const intervalMs = hasActiveBreaksForTicker ? 1000 : 10000;
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       setCurrentTime(new Date());
-    }, 1000);
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, []);
+  }, [hasActiveBreaksForTicker]);
 
   // Quick staff selection list
   const availableStaffForQuickStart = useMemo(() => {
@@ -1491,14 +1509,25 @@ export default function App() {
     setSupervisorResetNotes('');
   };
 
-  // Verify Supervisor Password (accepts any of the 4 Supervisor / 1 Manager passwords or Admin@123)
+  // Verify Supervisor Password (with brute-force rate limit)
   const verifySupervisorPassword = (e: React.FormEvent) => {
     e.preventDefault();
+    const rate = checkAuthRateLimit('supervisor_reset_modal');
+    if (rate.locked) {
+      setSupervisorPasswordError(`Too many wrong attempts. Please wait ${rate.remainingSecs}s.`);
+      return;
+    }
     if (isValidSupervisorOrManagerPassword(authAccounts, supervisorPasswordInput)) {
+      resetAuthRateLimit('supervisor_reset_modal');
       setSupervisorUnlocked(true);
       setSupervisorPasswordError('');
     } else {
-      setSupervisorPasswordError('Incorrect supervisor or manager password. Please try again.');
+      const fail = recordAuthFailure('supervisor_reset_modal');
+      setSupervisorPasswordError(
+        fail.locked
+          ? `Too many wrong attempts. Locked for ${fail.remainingSecs}s.`
+          : 'Incorrect supervisor or manager password. Please try again.'
+      );
     }
   };
 
@@ -1705,7 +1734,7 @@ export default function App() {
     showToast('Roster reset to standard 32 employees with Employee IDs', 'success');
   };
 
-  // Export Daily Logs to CSV (Android Chrome & Local File compatible)
+  // Export Daily Logs to CSV (CSV-Injection safe + Android Chrome & Local File compatible)
   const exportLogsToCSV = async () => {
     if (logs.length === 0) {
       showToast('No logs recorded yet to export', 'warning');
@@ -1716,13 +1745,13 @@ export default function App() {
       const allotted = resolveAllottedMins(l);
       const counted = getCountedMins(l, kioskSettings);
       const overThisBreak = Math.max(0, counted - allotted);
-      csv += `${l.id},${l.empId || ''},${l.date},${l.shift},"${l.staffName}",${l.breakType},${new Date(l.startTime).toLocaleTimeString()},${new Date(l.endTime).toLocaleTimeString()},${l.durationMins},${counted},${allotted},${overThisBreak},"${l.exceptionReason}","${l.notes || ''}",${l.source || 'supervisor'},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)},${Boolean(l.deleted)},"${l.deletedAt ? `${l.deletedAt} (${l.deletedDate || l.date})` : ''}","${l.deletedBy || ''}"\n`;
+      csv += `${sanitizeCsvCell(l.id)},${sanitizeCsvCell(l.empId || '')},${sanitizeCsvCell(l.date)},${sanitizeCsvCell(l.shift)},${sanitizeCsvCell(l.staffName)},${sanitizeCsvCell(l.breakType)},${sanitizeCsvCell(new Date(l.startTime).toLocaleTimeString())},${sanitizeCsvCell(new Date(l.endTime).toLocaleTimeString())},${Number(l.durationMins) || 0},${counted},${allotted},${overThisBreak},${sanitizeCsvCell(l.exceptionReason)},${sanitizeCsvCell(l.notes || '')},${sanitizeCsvCell(l.source || 'supervisor')},${Boolean(l.voided)},${Boolean(l.needsReview)},${Boolean(l.testMode)},${Boolean(l.deleted)},${sanitizeCsvCell(l.deletedAt ? `${l.deletedAt} (${l.deletedDate || l.date})` : '')},${sanitizeCsvCell(l.deletedBy || '')}\n`;
     });
     await downloadOrShareFile(`Washmen_Break_Logs_${todayStr}.csv`, csv, 'text/csv;charset=utf-8;', false);
     showToast('Exported Daily Break Logs CSV', 'success');
   };
 
-  // Export Monthly Report to CSV (uses daily allowance rule: Entitled = days present x allowance, Used, Difference, Overtime = sum of daily overtime, Days over allowance, Saved minutes)
+  // Export Monthly Report to CSV (CSV-Injection safe + uses daily allowance rule)
   const exportMonthlyReportToCSV = async () => {
     let csv = 'Month,Employee ID,Employee Name,Shift,Department,Days Present,Breaks Taken,Daily Allowance (Mins),Entitled (Mins),Entitled (Hours & Mins),Used (Mins),Used (Hours & Mins),Difference (Entitled - Used Mins),Overtime (Daily Rule Mins),Overtime (Hours & Mins),Days Over Allowance,Saved Minutes,Status\n';
     staff.forEach((st) => {
@@ -1739,7 +1768,7 @@ export default function App() {
           ? 'No Logs'
           : 'Within Allowance';
 
-      csv += `${reportMonth},${st.empId},"${st.name}",${st.shift},${st.department},${summary.daysPresent},${summary.breaksCount},${summary.dailyAllowanceMins},${summary.entitledMins},"${entitledFormatted}",${summary.usedMins},"${usedFormatted}",${summary.differenceMins},${summary.overtimeMins},"${overtimeFormatted}",${summary.daysOverAllowance},${summary.savedMins},"${statusStr}"\n`;
+      csv += `${sanitizeCsvCell(reportMonth)},${sanitizeCsvCell(st.empId)},${sanitizeCsvCell(st.name)},${sanitizeCsvCell(st.shift)},${sanitizeCsvCell(st.department)},${summary.daysPresent},${summary.breaksCount},${summary.dailyAllowanceMins},${summary.entitledMins},${sanitizeCsvCell(entitledFormatted)},${summary.usedMins},${sanitizeCsvCell(usedFormatted)},${summary.differenceMins},${summary.overtimeMins},${sanitizeCsvCell(overtimeFormatted)},${summary.daysOverAllowance},${summary.savedMins},${sanitizeCsvCell(statusStr)}\n`;
     });
     await downloadOrShareFile(
       `Washmen_Monthly_Summary_${reportMonth}.csv`,
@@ -1775,20 +1804,32 @@ export default function App() {
     showToast('Exported JSON Database Backup', 'success');
   };
 
-  // Import JSON Backup
+  // Import JSON Backup (Sanitized against Prototype Pollution & unbounded payloads)
   const handleImportJSON = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      showToast('Backup file exceeds 10MB safety limit', 'danger');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const parsed = JSON.parse(event.target?.result as string);
+        const parsed = sanitizeImportedBackupJson<{
+          staff?: StaffMember[];
+          activeBreaks?: ActiveBreak[];
+          logs?: BreakLog[];
+          deletedLogs?: string[];
+          deletedStaff?: string[];
+          kioskSettings?: Partial<KioskSettings>;
+          authAccounts?: AuthAccount[];
+        }>(String(event.target?.result || ''));
         if (parsed && Array.isArray(parsed.staff)) {
-          const nextStaff = parsed.staff;
-          const nextActive = parsed.activeBreaks || [];
-          const nextLogs = parsed.logs || [];
-          const nextDelLogs = Array.isArray(parsed.deletedLogs) ? parsed.deletedLogs : [];
-          const nextDelStaff = Array.isArray(parsed.deletedStaff) ? parsed.deletedStaff : [];
+          const nextStaff = parsed.staff.slice(0, 300);
+          const nextActive = Array.isArray(parsed.activeBreaks) ? parsed.activeBreaks.slice(0, 100) : [];
+          const nextLogs = Array.isArray(parsed.logs) ? parsed.logs.slice(0, 2000) : [];
+          const nextDelLogs = Array.isArray(parsed.deletedLogs) ? parsed.deletedLogs.slice(0, 2000) : [];
+          const nextDelStaff = Array.isArray(parsed.deletedStaff) ? parsed.deletedStaff.slice(0, 300) : [];
           const nextSettings = parsed.kioskSettings
             ? { ...DEFAULT_KIOSK_SETTINGS, ...parsed.kioskSettings, updatedAt: Date.now() }
             : kioskSettings;

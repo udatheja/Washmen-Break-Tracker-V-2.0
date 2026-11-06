@@ -21,6 +21,9 @@ import {
   AuthAccount,
   DEFAULT_AUTH_ACCOUNTS,
   authenticateLoginAccount,
+  checkAuthRateLimit,
+  recordAuthFailure,
+  resetAuthRateLimit,
   getVerifiedDeveloperMetadata,
   attachSafeCreditWatchdog,
   getWashmenLogoSrc,
@@ -77,11 +80,24 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
-    const matched = authenticateLoginAccount(accounts, usernameInput, passwordInput);
-    if (!matched) {
-      setLoginError('Invalid username or password. Please check your credentials and try again.');
+    const rateStatus = checkAuthRateLimit('portal_login');
+    if (rateStatus.locked) {
+      setLoginError(`Too many failed login attempts. Please wait ${rateStatus.remainingSecs}s before trying again.`);
       return;
     }
+    const matched = authenticateLoginAccount(accounts, usernameInput, passwordInput);
+    if (!matched) {
+      const failStatus = recordAuthFailure('portal_login');
+      if (failStatus.locked) {
+        setLoginError(`Too many failed login attempts. Login locked for ${failStatus.remainingSecs}s.`);
+      } else {
+        setLoginError(
+          `Invalid username or password. Please check your credentials and try again (${failStatus.attemptsLeft} attempt${failStatus.attemptsLeft === 1 ? '' : 's'} remaining before 30s cooldown).`
+        );
+      }
+      return;
+    }
+    resetAuthRateLimit('portal_login');
     setPasswordInput('');
     onLoginSuccess(matched);
   };

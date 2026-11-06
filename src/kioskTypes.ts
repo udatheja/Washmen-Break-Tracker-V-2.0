@@ -740,13 +740,47 @@ function detectAutoShiftFromMins(curMins: number, settings?: KioskSettings): 'Mo
   }
 }
 
+const _DUBAI_PARTS_FORMATTER =
+  typeof Intl !== 'undefined'
+    ? new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Dubai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      })
+    : null;
+
+const _DUBAI_DISPLAY_DATE_FORMATTER =
+  typeof Intl !== 'undefined'
+    ? new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Dubai',
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+      })
+    : null;
+
+const _DUBAI_SHORT_TIME_FORMATTER =
+  typeof Intl !== 'undefined'
+    ? new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Dubai',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    : null;
+
 /**
  * Returns Asia/Dubai date, time, and auto-detected shift based on configurable shiftTimings
  * (Switches to the incoming shift 30 minutes before shift start time, e.g. 7:30 AM & 7:30 PM for 8-to-8 shifts)
  */
 export function getDubaiTimeInfo(now: Date = new Date(), settings?: KioskSettings) {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
+    const parts = (_DUBAI_PARTS_FORMATTER || new Intl.DateTimeFormat('en-US', {
       timeZone: 'Asia/Dubai',
       year: 'numeric',
       month: '2-digit',
@@ -755,7 +789,7 @@ export function getDubaiTimeInfo(now: Date = new Date(), settings?: KioskSetting
       minute: '2-digit',
       second: '2-digit',
       hour12: false,
-    }).formatToParts(now);
+    })).formatToParts(now);
 
     const get = (type: string) => parts.find((p) => p.type === type)?.value || '00';
     const year = get('year');
@@ -772,12 +806,12 @@ export function getDubaiTimeInfo(now: Date = new Date(), settings?: KioskSetting
     const clockStr = `${String(hour).padStart(2, '0')}:${minute}:${second}`;
     const autoShift: 'Morning' | 'Night' = detectAutoShiftFromMins(hour * 60 + minuteNum, settings);
 
-    const displayDate = new Intl.DateTimeFormat('en-US', {
+    const displayDate = (_DUBAI_DISPLAY_DATE_FORMATTER || new Intl.DateTimeFormat('en-US', {
       timeZone: 'Asia/Dubai',
       weekday: 'short',
       month: 'short',
       day: 'numeric',
-    }).format(now);
+    })).format(now);
 
     return { dateStr, time24, clockStr, autoShift, displayDate, hour, minute: minuteNum };
   } catch {
@@ -1161,12 +1195,12 @@ export function calculateEmployeeMonthlyReport(
 export function formatDubaiTimeShort(isoOrDate: string | Date): string {
   try {
     const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
-    return new Intl.DateTimeFormat('en-GB', {
+    return (_DUBAI_SHORT_TIME_FORMATTER || new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Asia/Dubai',
       hour: '2-digit',
       minute: '2-digit',
       hour12: false,
-    }).format(d);
+    })).format(d);
   } catch {
     const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -1195,8 +1229,13 @@ const IDB_DB_NAME = 'WashmenAndroidLocalDB';
 const IDB_STORE_NAME = 'kv_store';
 const memoryStorageFallback = new Map<string, string>();
 
+let _cachedIdbPromise: Promise<IDBDatabase | null> | null = null;
+const _pendingIdbWrites = new Map<string, string>();
+let _idbFlushTimer: number | null = null;
+
 function openAndroidIdb(): Promise<IDBDatabase | null> {
-  return new Promise((resolve) => {
+  if (_cachedIdbPromise) return _cachedIdbPromise;
+  _cachedIdbPromise = new Promise((resolve) => {
     try {
       if (typeof window === 'undefined' || !window.indexedDB) {
         resolve(null);
@@ -1209,27 +1248,60 @@ function openAndroidIdb(): Promise<IDBDatabase | null> {
           db.createObjectStore(IDB_STORE_NAME);
         }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        const db = req.result;
+        db.onclose = () => {
+          _cachedIdbPromise = null;
+        };
+        resolve(db);
+      };
+      req.onerror = () => {
+        _cachedIdbPromise = null;
+        resolve(null);
+      };
     } catch {
+      _cachedIdbPromise = null;
       resolve(null);
     }
   });
+  return _cachedIdbPromise;
 }
 
-function writeToAndroidIdb(key: string, value: string): void {
+function flushAndroidIdbWrites(): void {
+  _idbFlushTimer = null;
+  if (_pendingIdbWrites.size === 0) return;
+  const entries = Array.from(_pendingIdbWrites.entries());
+  _pendingIdbWrites.clear();
   openAndroidIdb()
     .then((db) => {
       if (!db) return;
       try {
         const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
-        tx.objectStore(IDB_STORE_NAME).put(value, key);
-      } catch {}
+        const store = tx.objectStore(IDB_STORE_NAME);
+        for (const [k, v] of entries) {
+          store.put(v, k);
+        }
+      } catch {
+        _cachedIdbPromise = null;
+      }
     })
     .catch(() => {});
 }
 
+function writeToAndroidIdb(key: string, value: string): void {
+  _pendingIdbWrites.set(key, value);
+  if (typeof window === 'undefined') {
+    flushAndroidIdbWrites();
+    return;
+  }
+  if (_idbFlushTimer === null) {
+    _idbFlushTimer = window.setTimeout(flushAndroidIdbWrites, 400);
+  }
+}
+
 export function readFromAndroidIdb(key: string): Promise<string | null> {
+  const pending = _pendingIdbWrites.get(key);
+  if (pending !== undefined) return Promise.resolve(pending);
   return openAndroidIdb().then((db) => {
     if (!db) return null;
     return new Promise((resolve) => {
@@ -1245,29 +1317,58 @@ export function readFromAndroidIdb(key: string): Promise<string | null> {
   });
 }
 
+let _windowNameCache: Record<string, string> | null = null;
+let _windowNameFlushTimer: number | null = null;
+
 function readWindowNameMap(): Record<string, string> {
+  if (_windowNameCache) return _windowNameCache;
   try {
     if (typeof window !== 'undefined' && window.name && window.name.startsWith('{')) {
       const parsed = JSON.parse(window.name);
-      if (parsed && typeof parsed === 'object') return parsed;
+      if (parsed && typeof parsed === 'object') {
+        _windowNameCache = parsed;
+        return parsed;
+      }
     }
   } catch {}
-  return {};
+  _windowNameCache = {};
+  return _windowNameCache;
 }
 
 function writeWindowNameKey(key: string, value: string): void {
+  // Never store sensitive credentials in window.name unless running on restricted local file:// protocol
+  if (
+    !isLocalFileProtocol() &&
+    (key === AUTH_ACCOUNTS_STORAGE_KEY || key === PIN_STORAGE_KEY || key === AUTH_SESSION_STORAGE_KEY)
+  ) {
+    return;
+  }
   try {
     if (typeof window !== 'undefined') {
       const current = readWindowNameMap();
+      if (current[key] === value) return;
       current[key] = value;
-      window.name = JSON.stringify(current);
+      if (_windowNameFlushTimer === null) {
+        _windowNameFlushTimer = window.setTimeout(() => {
+          _windowNameFlushTimer = null;
+          try {
+            if (_windowNameCache) {
+              window.name = JSON.stringify(_windowNameCache);
+            }
+          } catch {}
+        }, 500);
+      }
     }
   } catch {}
 }
 
 const EMBEDDED_TS_STORAGE_KEY = '__washmen_embedded_state_ts_v1__';
+let _hasCheckedEmbeddedHtmlState = false;
+let _lastEmbeddedTsResult = 0;
 
 export function syncEmbeddedHtmlStateToLocalStorage(): number {
+  if (_hasCheckedEmbeddedHtmlState) return _lastEmbeddedTsResult;
+  _hasCheckedEmbeddedHtmlState = true;
   try {
     if (typeof document === 'undefined') return 0;
     const holder = document.getElementById('washmen-embedded-state');
@@ -1306,6 +1407,7 @@ export function syncEmbeddedHtmlStateToLocalStorage(): number {
       try {
         window.localStorage?.setItem(EMBEDDED_TS_STORAGE_KEY, String(embeddedTs));
       } catch {}
+      _lastEmbeddedTsResult = embeddedTs;
       return embeddedTs;
     }
   } catch {}
@@ -1327,6 +1429,13 @@ function readEmbeddedHtmlStateKey(key: string): string | null {
 
 function readUrlHashKey(key: string): string | null {
   try {
+    if (
+      key === PIN_STORAGE_KEY ||
+      key === AUTH_ACCOUNTS_STORAGE_KEY ||
+      key === AUTH_SESSION_STORAGE_KEY
+    ) {
+      return null;
+    }
     if (typeof window === 'undefined' || !window.location.hash) return null;
     const hash = window.location.hash.replace(/^#/, '');
     if (!hash.startsWith('wstate=')) return null;
@@ -1351,46 +1460,28 @@ export function isPersistentBrowserStorageBlocked(): boolean {
   }
 }
 
-function updateLiveEmbeddedStateDom(key: string, value: string): void {
-  try {
-    if (key === AUTH_SESSION_STORAGE_KEY || key === ACTIVE_TAB_STORAGE_KEY) return;
-    if (typeof document === 'undefined' || !document.body) return;
-    let holder = document.getElementById('washmen-embedded-state') as HTMLScriptElement | null;
-    let current: Record<string, string> = {};
-    if (holder && holder.textContent) {
-      try {
-        current = JSON.parse(holder.textContent) || {};
-      } catch {
-        current = {};
-      }
-    }
-    current[key] = value;
-    if (!holder) {
-      holder = document.createElement('script');
-      holder.id = 'washmen-embedded-state';
-      holder.type = 'application/json';
-      holder.setAttribute('style', 'display:none!important');
-      holder.hidden = true;
-      document.body.appendChild(holder);
-    }
-    holder.textContent = JSON.stringify(current);
-  } catch {}
-}
-
 function writeUrlHashKey(key: string, value: string): void {
   try {
     if (!isLocalFileProtocol() || typeof window === 'undefined') return;
+    // Security: NEVER write passwords, PINs, or session tokens into the URL hash
     if (
       key !== KIOSK_SETTINGS_STORAGE_KEY &&
       key !== KIOSK_LOCK_STORAGE_KEY &&
-      key !== PIN_STORAGE_KEY &&
-      key !== AUTH_ACCOUNTS_STORAGE_KEY &&
-      key !== AUTH_SESSION_STORAGE_KEY &&
       key !== ACTIVE_TAB_STORAGE_KEY &&
       key !== MAIN_STORAGE_KEY &&
       key !== 'washmen_break_tracker_v2'
     ) {
       return;
+    }
+    let sanitizedValue = value;
+    if (key === MAIN_STORAGE_KEY || key === 'washmen_break_tracker_v2') {
+      try {
+        const parsedObj = JSON.parse(value);
+        if (parsedObj && typeof parsedObj === 'object') {
+          delete parsedObj.authAccounts;
+          sanitizedValue = JSON.stringify(parsedObj);
+        }
+      } catch {}
     }
     const hash = (window.location.hash || '').replace(/^#/, '');
     let current: Record<string, string> = {};
@@ -1401,7 +1492,7 @@ function writeUrlHashKey(key: string, value: string): void {
         current = {};
       }
     }
-    current[key] = value;
+    current[key] = sanitizedValue;
     const encodedPayload = encodeURIComponent(JSON.stringify(current));
     // Keep URL hash under safe browser URL limit
     if (encodedPayload.length > 250000) return;
@@ -1421,11 +1512,19 @@ function writeUrlHashKey(key: string, value: string): void {
 }
 
 export function safeGetStorage(key: string): string | null {
-  syncEmbeddedHtmlStateToLocalStorage();
+  if (!_hasCheckedEmbeddedHtmlState) {
+    syncEmbeddedHtmlStateToLocalStorage();
+  }
+  const memVal = memoryStorageFallback.get(key);
+  if (memVal !== undefined) return memVal;
+
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const val = window.localStorage.getItem(key);
-      if (val !== null) return val;
+      if (val !== null) {
+        memoryStorageFallback.set(key, val);
+        return val;
+      }
     }
   } catch {
     // Fallback when Android content:// or file:// restricts localStorage
@@ -1434,12 +1533,12 @@ export function safeGetStorage(key: string): string | null {
   try {
     if (typeof window !== 'undefined' && window.sessionStorage) {
       const sVal = window.sessionStorage.getItem(key);
-      if (sVal !== null) return sVal;
+      if (sVal !== null) {
+        memoryStorageFallback.set(key, sVal);
+        return sVal;
+      }
     }
   } catch {}
-
-  const memVal = memoryStorageFallback.get(key);
-  if (memVal !== undefined) return memVal;
 
   const winNameVal = readWindowNameMap()[key];
   if (typeof winNameVal === 'string') {
@@ -1463,7 +1562,11 @@ export function safeGetStorage(key: string): string | null {
 }
 
 export function safeSetStorage(key: string, value: string): void {
+  const prev = memoryStorageFallback.get(key);
   memoryStorageFallback.set(key, value);
+  if (prev === value) {
+    return;
+  }
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       window.localStorage.setItem(key, value);
@@ -1478,7 +1581,6 @@ export function safeSetStorage(key: string, value: string): void {
   } catch {}
   writeWindowNameKey(key, value);
   writeUrlHashKey(key, value);
-  updateLiveEmbeddedStateDom(key, value);
   writeToAndroidIdb(key, value);
 }
 
@@ -1911,23 +2013,106 @@ export function attachSafeCreditWatchdog(
       });
     }
 
-    const intervalId = window.setInterval(() => {
-      try {
-        if (document.hidden || document.visibilityState === 'hidden') return;
-        performSafeCheck(true);
-      } catch {}
-    }, THROTTLE_MS);
-
     return () => {
       try {
         if (observer) observer.disconnect();
-        window.clearInterval(intervalId);
         if (throttleTimerId !== null) window.clearTimeout(throttleTimerId);
       } catch {}
     };
   } catch {
     return () => {};
   }
+}
+
+// ============================================================================
+// SECURITY HARDENING UTILITIES (CSV Formula Guard, JSON Prototype Pollution
+// Sanitizer, and Client-Side Brute-Force Rate Limiter)
+// ============================================================================
+
+/**
+ * Prevents CSV Formula Injection (CWE-1236) in Excel / Google Sheets / LibreOffice Calc.
+ * Cells beginning with '=', '+', '-', '@', Tab, or CR are prefixed with a single quote
+ * and wrapped in properly escaped double quotes.
+ */
+export function sanitizeCsvCell(value: unknown): string {
+  if (value === null || value === undefined) return '""';
+  let str = String(value).replace(/\r?\n/g, ' ').trim();
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  const escaped = str.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+/**
+ * Safely parses untrusted JSON backups while stripping dangerous prototype pollution
+ * keys (__proto__, constructor, prototype) (CWE-1321).
+ */
+export function sanitizeImportedBackupJson<T = Record<string, unknown>>(rawJson: string): T | null {
+  try {
+    if (typeof rawJson !== 'string' || rawJson.length > 10 * 1024 * 1024) {
+      return null;
+    }
+    const parsed = JSON.parse(rawJson, (key, val) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        return undefined;
+      }
+      return val;
+    });
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as T;
+  } catch {
+    return null;
+  }
+}
+
+interface RateLimitState {
+  failures: number;
+  lockedUntilMs: number;
+}
+
+const _authRateLimits = new Map<string, RateLimitState>();
+const MAX_AUTH_FAILURES = 5;
+const AUTH_LOCKOUT_MS = 30 * 1000; // 30 seconds cooldown after 5 consecutive failed attempts
+
+export function checkAuthRateLimit(scope: string = 'global'): { locked: boolean; remainingSecs: number } {
+  const entry = _authRateLimits.get(scope);
+  if (!entry) return { locked: false, remainingSecs: 0 };
+  const now = Date.now();
+  if (entry.lockedUntilMs > now) {
+    return {
+      locked: true,
+      remainingSecs: Math.max(1, Math.ceil((entry.lockedUntilMs - now) / 1000)),
+    };
+  }
+  return { locked: false, remainingSecs: 0 };
+}
+
+export function recordAuthFailure(scope: string = 'global'): { locked: boolean; remainingSecs: number; attemptsLeft: number } {
+  const now = Date.now();
+  const prev = _authRateLimits.get(scope) || { failures: 0, lockedUntilMs: 0 };
+  const activeFailures = prev.lockedUntilMs > 0 && prev.lockedUntilMs <= now ? 1 : prev.failures + 1;
+  if (activeFailures >= MAX_AUTH_FAILURES) {
+    const lockedUntilMs = now + AUTH_LOCKOUT_MS;
+    _authRateLimits.set(scope, { failures: activeFailures, lockedUntilMs });
+    return {
+      locked: true,
+      remainingSecs: Math.ceil(AUTH_LOCKOUT_MS / 1000),
+      attemptsLeft: 0,
+    };
+  }
+  _authRateLimits.set(scope, { failures: activeFailures, lockedUntilMs: 0 });
+  return {
+    locked: false,
+    remainingSecs: 0,
+    attemptsLeft: Math.max(0, MAX_AUTH_FAILURES - activeFailures),
+  };
+}
+
+export function resetAuthRateLimit(scope: string = 'global'): void {
+  _authRateLimits.delete(scope);
 }
 
 /**
