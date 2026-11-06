@@ -179,68 +179,71 @@ export async function pullCloudStationSync(): Promise<CloudStationSyncPayload | 
 }
 
 /**
- * Safely merges the incoming local mutation with the current Firestore server document
- * before writing, so no device can ever accidentally overwrite active breaks, logs,
- * or passwords created on another device.
+ * Writes the updated station state to Firestore so all devices worldwide receive updates immediately.
+ * When mergeWithServer is true (e.g. initial seed), merges with existing server document;
+ * for explicit user mutations (default), writes the latest station state directly as the authoritative state.
  */
 export async function pushCloudStationSync(
   payload: Omit<CloudStationSyncPayload, 'stationId' | 'syncToken' | 'updatedAtMs'> & {
     updatedAtMs?: number;
-  }
+  },
+  mergeWithServer: boolean = false
 ): Promise<CloudStationSyncPayload | null> {
   const path = `${STATION_SYNC_COLLECTION}/${STATION_SYNC_DOC_ID}`;
   const docRef = doc(db, STATION_SYNC_COLLECTION, STATION_SYNC_DOC_ID);
   try {
-    let existingCloud: CloudStationSyncPayload | null = null;
-    try {
-      const snap = await getDocFromServer(docRef);
-      if (snap.exists()) {
-        existingCloud = snap.data() as CloudStationSyncPayload;
-      }
-    } catch {
-      try {
-        const fallbackSnap = await getDoc(docRef);
-        if (fallbackSnap.exists()) {
-          existingCloud = fallbackSnap.data() as CloudStationSyncPayload;
-        }
-      } catch {}
-    }
-
     let finalPayload = payload;
-    if (existingCloud) {
-      const mergedState = mergeState(
-        {
-          staff: existingCloud.staff,
-          activeBreaks: existingCloud.activeBreaks,
-          logs: existingCloud.logs,
-          deletedLogs: existingCloud.deletedLogs,
-          deletedStaff: existingCloud.deletedStaff,
-          closedBreakIds: existingCloud.closedBreakIds,
-          kioskSettings: existingCloud.kioskSettings,
-        },
-        {
-          staff: payload.staff,
-          activeBreaks: payload.activeBreaks,
-          logs: payload.logs,
-          deletedLogs: payload.deletedLogs,
-          deletedStaff: payload.deletedStaff,
-          closedBreakIds: payload.closedBreakIds,
-          kioskSettings: payload.kioskSettings,
+    if (mergeWithServer) {
+      let existingCloud: CloudStationSyncPayload | null = null;
+      try {
+        const snap = await getDocFromServer(docRef);
+        if (snap.exists()) {
+          existingCloud = snap.data() as CloudStationSyncPayload;
         }
-      );
-      const mergedAccounts = mergeAuthAccounts(existingCloud.authAccounts, payload.authAccounts);
-      finalPayload = {
-        authAccounts: mergedAccounts,
-        staff: mergedState.staff,
-        activeBreaks: mergedState.activeBreaks,
-        logs: mergedState.logs,
-        deletedLogs: mergedState.deletedLogs,
-        deletedStaff: mergedState.deletedStaff || [],
-        closedBreakIds: mergedState.closedBreakIds || [],
-        kioskSettings: mergedState.kioskSettings,
-        updatedByRole: payload.updatedByRole,
-        updatedAtMs: Date.now(),
-      };
+      } catch {
+        try {
+          const fallbackSnap = await getDoc(docRef);
+          if (fallbackSnap.exists()) {
+            existingCloud = fallbackSnap.data() as CloudStationSyncPayload;
+          }
+        } catch {}
+      }
+
+      if (existingCloud) {
+        const mergedState = mergeState(
+          {
+            staff: existingCloud.staff,
+            activeBreaks: existingCloud.activeBreaks,
+            logs: existingCloud.logs,
+            deletedLogs: existingCloud.deletedLogs,
+            deletedStaff: existingCloud.deletedStaff,
+            closedBreakIds: existingCloud.closedBreakIds,
+            kioskSettings: existingCloud.kioskSettings,
+          },
+          {
+            staff: payload.staff,
+            activeBreaks: payload.activeBreaks,
+            logs: payload.logs,
+            deletedLogs: payload.deletedLogs,
+            deletedStaff: payload.deletedStaff,
+            closedBreakIds: payload.closedBreakIds,
+            kioskSettings: payload.kioskSettings,
+          }
+        );
+        const mergedAccounts = mergeAuthAccounts(existingCloud.authAccounts, payload.authAccounts);
+        finalPayload = {
+          authAccounts: mergedAccounts,
+          staff: mergedState.staff,
+          activeBreaks: mergedState.activeBreaks,
+          logs: mergedState.logs,
+          deletedLogs: mergedState.deletedLogs,
+          deletedStaff: mergedState.deletedStaff || [],
+          closedBreakIds: mergedState.closedBreakIds || [],
+          kioskSettings: mergedState.kioskSettings,
+          updatedByRole: payload.updatedByRole,
+          updatedAtMs: Date.now(),
+        };
+      }
     }
 
     const bounded = buildBoundedStationPayload(finalPayload);

@@ -876,6 +876,53 @@ function writeWindowNameKey(key: string, value: string): void {
   } catch {}
 }
 
+const EMBEDDED_TS_STORAGE_KEY = '__washmen_embedded_state_ts_v1__';
+
+export function syncEmbeddedHtmlStateToLocalStorage(): number {
+  try {
+    if (typeof document === 'undefined') return 0;
+    const holder = document.getElementById('washmen-embedded-state');
+    if (!holder || !holder.textContent) return 0;
+    const parsed = JSON.parse(holder.textContent);
+    if (!parsed || typeof parsed !== 'object') return 0;
+    const embeddedTs = Number(parsed._embeddedAt || 0);
+    if (embeddedTs <= 0) return 0;
+
+    let lastAppliedTs = 0;
+    try {
+      lastAppliedTs = Number(window.localStorage?.getItem(EMBEDDED_TS_STORAGE_KEY) || 0);
+    } catch {}
+
+    if (embeddedTs > lastAppliedTs) {
+      const keysToSync = [
+        MAIN_STORAGE_KEY,
+        'washmen_break_tracker_v2',
+        KIOSK_SETTINGS_STORAGE_KEY,
+        AUTH_ACCOUNTS_STORAGE_KEY,
+        PIN_STORAGE_KEY,
+        KIOSK_LOCK_STORAGE_KEY,
+      ];
+      for (const k of keysToSync) {
+        if (typeof parsed[k] === 'string' && parsed[k].length > 0) {
+          memoryStorageFallback.set(k, parsed[k]);
+          try {
+            window.localStorage?.setItem(k, parsed[k]);
+          } catch {}
+          try {
+            window.sessionStorage?.setItem(k, parsed[k]);
+          } catch {}
+          writeToAndroidIdb(k, parsed[k]);
+        }
+      }
+      try {
+        window.localStorage?.setItem(EMBEDDED_TS_STORAGE_KEY, String(embeddedTs));
+      } catch {}
+      return embeddedTs;
+    }
+  } catch {}
+  return 0;
+}
+
 function readEmbeddedHtmlStateKey(key: string): string | null {
   try {
     if (typeof document === 'undefined') return null;
@@ -985,6 +1032,7 @@ function writeUrlHashKey(key: string, value: string): void {
 }
 
 export function safeGetStorage(key: string): string | null {
+  syncEmbeddedHtmlStateToLocalStorage();
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const val = window.localStorage.getItem(key);
@@ -1215,7 +1263,9 @@ export async function downloadOrShareFile(
 function injectEmbeddedStateIntoHtml(html: string): string {
   try {
     const devInfo = getVerifiedDeveloperMetadata();
+    const nowTs = String(Date.now());
     const statePayload: Record<string, string> = {
+      _embeddedAt: nowTs,
       _systemArchitect: devInfo.fullName,
       _createdBy: devInfo.createdByLabel,
       _developerSignature: devInfo.signatureHash,
@@ -1236,7 +1286,7 @@ function injectEmbeddedStateIntoHtml(html: string): string {
     if (authAccountsData) statePayload[AUTH_ACCOUNTS_STORAGE_KEY] = authAccountsData;
 
     const jsonText = JSON.stringify(statePayload).replace(/<\//g, '<\\/');
-    const scriptTag = `<script id="washmen-embedded-state" data-system-architect="${devInfo.fullName}" data-created-by="${devInfo.createdByLabel}" data-signature="${devInfo.signatureHash}" type="application/json" style="display:none!important" hidden>${jsonText}</script>`;
+    const scriptTag = `<script id="washmen-embedded-state" data-embedded-at="${nowTs}" data-system-architect="${devInfo.fullName}" data-created-by="${devInfo.createdByLabel}" data-signature="${devInfo.signatureHash}" type="application/json" style="display:none!important" hidden>${jsonText}</script>`;
 
     const existingRegex = /<script id="washmen-embedded-state"[^>]*>[\s\S]*?<\/script>/i;
     if (existingRegex.test(html)) {
@@ -1517,6 +1567,8 @@ export async function downloadSelfContainedHtml(
 // 3 LOGIN ACCOUNTS: MANAGER, SUPERVISOR, AND DISPLAY (KIOSK-ONLY)
 // ============================================================================
 
+export const AUTH_SCHEMA_VERSION = 2026110604;
+
 export interface AuthAccount {
   id: string;
   role: 'Manager' | 'Supervisor' | 'Display';
@@ -1527,6 +1579,7 @@ export interface AuthAccount {
   password: string;
   defaultPassword: string;
   updatedAt?: number;
+  schemaVersion?: number;
 }
 
 export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
@@ -1539,6 +1592,7 @@ export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
     empId: 'MGR',
     password: 'Venki@123',
     defaultPassword: 'Venki@123',
+    schemaVersion: AUTH_SCHEMA_VERSION,
   },
   {
     id: 'acc_supervisor',
@@ -1549,6 +1603,7 @@ export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
     empId: 'SUP',
     password: 'Washmen@123',
     defaultPassword: 'Washmen@123',
+    schemaVersion: AUTH_SCHEMA_VERSION,
   },
   {
     id: 'acc_display',
@@ -1559,6 +1614,7 @@ export const DEFAULT_AUTH_ACCOUNTS: AuthAccount[] = [
     empId: 'DSP',
     password: 'Pass@123',
     defaultPassword: 'Pass@123',
+    schemaVersion: AUTH_SCHEMA_VERSION,
   },
 ];
 
@@ -1574,7 +1630,10 @@ export function normalizeAuthAccounts(raw: unknown): AuthAccount[] {
   }
   return DEFAULT_AUTH_ACCOUNTS.map((def) => {
     const saved = mapById.get(def.id);
-    if (!saved) return { ...def };
+    // If saved account is from an older schema version (before the 3-login Venki@123 / Washmen@123 / Pass@123 update), reset to new defaults
+    if (!saved || Number(saved.schemaVersion || 0) < AUTH_SCHEMA_VERSION) {
+      return { ...def, schemaVersion: AUTH_SCHEMA_VERSION };
+    }
     const rawUsername = String(saved.username || def.username).trim();
     const normalizedUsername =
       rawUsername.toLowerCase() === def.username.toLowerCase() ? def.username : rawUsername || def.username;
@@ -1586,11 +1645,13 @@ export function normalizeAuthAccounts(raw: unknown): AuthAccount[] {
       username: normalizedUsername,
       password: normalizedPass,
       updatedAt: LEGACY_DEFAULT_PASSWORDS.has(rawPass) ? undefined : Number(saved.updatedAt || 0) || undefined,
+      schemaVersion: AUTH_SCHEMA_VERSION,
     };
   });
 }
 
 export function getStoredAuthAccounts(): AuthAccount[] {
+  syncEmbeddedHtmlStateToLocalStorage();
   try {
     const raw = safeGetStorage(AUTH_ACCOUNTS_STORAGE_KEY);
     if (raw) {
@@ -1608,7 +1669,11 @@ export function getStoredAuthAccounts(): AuthAccount[] {
 }
 
 export function saveStoredAuthAccounts(accounts: AuthAccount[]): AuthAccount[] {
-  const normalized = normalizeAuthAccounts(accounts);
+  const stamped = (accounts || []).map((a) => ({
+    ...a,
+    schemaVersion: AUTH_SCHEMA_VERSION,
+  }));
+  const normalized = normalizeAuthAccounts(stamped);
   safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(normalized));
   return normalized;
 }
@@ -1625,9 +1690,9 @@ export function mergeAuthAccounts(
     const bTime = Number(b.updatedAt || 0);
     const incTime = Number(inc.updatedAt || 0);
     if (incTime >= bTime) {
-      return { ...inc };
+      return { ...inc, schemaVersion: AUTH_SCHEMA_VERSION };
     }
-    return { ...b };
+    return { ...b, schemaVersion: AUTH_SCHEMA_VERSION };
   });
 }
 

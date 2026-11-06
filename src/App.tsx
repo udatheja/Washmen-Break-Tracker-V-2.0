@@ -52,6 +52,7 @@ import {
   AuthAccount,
   AUTH_ACCOUNTS_STORAGE_KEY,
   AUTH_SESSION_STORAGE_KEY,
+  AUTH_SCHEMA_VERSION,
   ACTIVE_TAB_STORAGE_KEY,
   getStoredAuthAccounts,
   saveStoredAuthAccounts,
@@ -62,6 +63,7 @@ import {
   normalizeAuthAccounts,
   isValidSupervisorOrManagerPassword,
   mergeState,
+  syncEmbeddedHtmlStateToLocalStorage,
   getDubaiTimeInfo,
   isUsingDefaultPin,
   verifyPinOnServer,
@@ -272,6 +274,7 @@ export default function App() {
     isLocalFileProtocol() ? false : typeof navigator !== 'undefined' ? !navigator.onLine : false
   );
   const isStorageHydratedRef = useRef<boolean>(false);
+  const hasReceivedCloudSnapshotRef = useRef<boolean>(false);
 
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
@@ -442,9 +445,12 @@ export default function App() {
     };
   }, [staff, activeBreaks, logs, deletedLogs, deletedStaff, closedBreakIds, kioskSettings, authAccounts]);
 
-  // Helper to apply incoming cloud snapshot cleanly into local state & storage
+  // Helper to apply incoming cloud snapshot cleanly as authoritative state into local state & storage
   const applyCloudSnapshotToLocal = useCallback((cloudData: CloudStationSyncPayload) => {
     try {
+      hasReceivedCloudSnapshotRef.current = true;
+      isStorageHydratedRef.current = true;
+
       const localAccounts = stateRef.current.authAccounts;
       const mergedAccounts = saveStoredAuthAccounts(
         mergeAuthAccounts(localAccounts, cloudData.authAccounts)
@@ -460,55 +466,82 @@ export default function App() {
         return prevLogged;
       });
 
-      const mergedState = mergeState(stateRef.current, {
-        staff: cloudData.staff,
-        activeBreaks: cloudData.activeBreaks,
-        logs: cloudData.logs,
-        deletedLogs: cloudData.deletedLogs,
-        deletedStaff: cloudData.deletedStaff,
-        closedBreakIds: cloudData.closedBreakIds,
-        kioskSettings: cloudData.kioskSettings,
-      });
-      const cleanedStaff = mergedState.staff.filter(
-        (s) => !EXCLUDED_EMP_IDS.includes(String(s.empId))
+      const delStaffSet = new Set<string>(
+        Array.isArray(cloudData.deletedStaff) ? cloudData.deletedStaff : []
       );
+      const delLogSet = new Set<string>(
+        Array.isArray(cloudData.deletedLogs) ? cloudData.deletedLogs : []
+      );
+      const closedBreakSet = new Set<string>(
+        Array.isArray(cloudData.closedBreakIds) ? cloudData.closedBreakIds : []
+      );
+
+      const rawCloudStaff =
+        Array.isArray(cloudData.staff) && cloudData.staff.length > 0
+          ? (cloudData.staff as StaffMember[])
+          : stateRef.current.staff;
+      const cleanedStaff = rawCloudStaff.filter(
+        (s) => !EXCLUDED_EMP_IDS.includes(String(s.empId)) && !delStaffSet.has(s.id)
+      );
+
+      const nextActiveBreaks = Array.isArray(cloudData.activeBreaks)
+        ? (cloudData.activeBreaks as ActiveBreak[]).filter((b) => !closedBreakSet.has(b.id))
+        : stateRef.current.activeBreaks;
+
+      const nextLogs = Array.isArray(cloudData.logs)
+        ? (cloudData.logs as BreakLog[]).filter((l) => !delLogSet.has(l.id))
+        : stateRef.current.logs;
+
+      const nextSettings: KioskSettings = cloudData.kioskSettings
+        ? { ...DEFAULT_KIOSK_SETTINGS, ...cloudData.kioskSettings }
+        : stateRef.current.kioskSettings;
+
+      const nextDeletedLogs = Array.from(delLogSet);
+      const nextDeletedStaff = Array.from(delStaffSet);
+      const nextClosedBreakIds = Array.from(closedBreakSet);
 
       stateRef.current = {
         staff: cleanedStaff,
-        activeBreaks: mergedState.activeBreaks,
-        logs: mergedState.logs,
-        deletedLogs: mergedState.deletedLogs,
-        deletedStaff: mergedState.deletedStaff || [],
-        closedBreakIds: mergedState.closedBreakIds || [],
-        kioskSettings: mergedState.kioskSettings,
+        activeBreaks: nextActiveBreaks,
+        logs: nextLogs,
+        deletedLogs: nextDeletedLogs,
+        deletedStaff: nextDeletedStaff,
+        closedBreakIds: nextClosedBreakIds,
+        kioskSettings: nextSettings,
         authAccounts: mergedAccounts,
       };
 
       if (cleanedStaff.length > 0) {
         setStaff(cleanedStaff);
       }
-      setActiveBreaks(mergedState.activeBreaks);
-      setLogs(mergedState.logs);
-      setDeletedLogs(mergedState.deletedLogs);
-      setDeletedStaff(mergedState.deletedStaff || []);
-      setClosedBreakIds(mergedState.closedBreakIds || []);
-      setKioskSettings(mergedState.kioskSettings);
+      setActiveBreaks(nextActiveBreaks);
+      setLogs(nextLogs);
+      setDeletedLogs(nextDeletedLogs);
+      setDeletedStaff(nextDeletedStaff);
+      setClosedBreakIds(nextClosedBreakIds);
+      setKioskSettings(nextSettings);
 
       safeSetStorage(
         STORAGE_KEY,
         JSON.stringify({
-          ...mergedState,
           staff: cleanedStaff,
+          activeBreaks: nextActiveBreaks,
+          logs: nextLogs,
+          deletedLogs: nextDeletedLogs,
+          deletedStaff: nextDeletedStaff,
+          closedBreakIds: nextClosedBreakIds,
+          kioskSettings: nextSettings,
           authAccounts: mergedAccounts,
         })
       );
-      safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(mergedState.kioskSettings));
+      safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
+      safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(mergedAccounts));
     } catch (err) {
       console.error('Failed to apply cloud sync snapshot:', err);
     }
   }, []);
 
-  // Shared serverSync function (pushes on explicit user actions; pulls read-only when called from background interval)
+  // Shared serverSync function (pushes authoritative state on explicit user actions; pulls read-only when called from background interval)
   const serverSync = useCallback(
     (overridePartial?: Partial<typeof stateRef.current>) => {
       if (!overridePartial) {
@@ -520,63 +553,66 @@ export default function App() {
           }
         });
       } else {
+        // Authoritative mutation: never merge stale localStorage back into overridePartial
         const payload = {
           ...stateRef.current,
           ...overridePartial,
         };
         isStorageHydratedRef.current = true;
         try {
-          const existingRaw = safeGetStorage(STORAGE_KEY);
-          const existingParsed = existingRaw ? JSON.parse(existingRaw) : {};
-          const mergedLocal = mergeState(existingParsed, payload);
-          const mergedAccounts = mergeAuthAccounts(existingParsed?.authAccounts, payload.authAccounts);
-          const nextStaffCleaned = mergedLocal.staff.filter((s) => !EXCLUDED_EMP_IDS.includes(String(s.empId)));
+          const delStaffSet = new Set<string>(payload.deletedStaff || []);
+          const nextStaffCleaned = (payload.staff || []).filter(
+            (s) => !EXCLUDED_EMP_IDS.includes(String(s.empId)) && !delStaffSet.has(s.id)
+          );
+          const nextAccounts = normalizeAuthAccounts(payload.authAccounts);
+          const nextSettings = { ...DEFAULT_KIOSK_SETTINGS, ...payload.kioskSettings };
+
           stateRef.current = {
             staff: nextStaffCleaned,
-            activeBreaks: mergedLocal.activeBreaks,
-            logs: mergedLocal.logs,
-            deletedLogs: mergedLocal.deletedLogs,
-            deletedStaff: mergedLocal.deletedStaff || [],
-            closedBreakIds: mergedLocal.closedBreakIds || [],
-            kioskSettings: mergedLocal.kioskSettings,
-            authAccounts: mergedAccounts,
+            activeBreaks: payload.activeBreaks || [],
+            logs: payload.logs || [],
+            deletedLogs: payload.deletedLogs || [],
+            deletedStaff: payload.deletedStaff || [],
+            closedBreakIds: payload.closedBreakIds || [],
+            kioskSettings: nextSettings,
+            authAccounts: nextAccounts,
           };
+
           safeSetStorage(
             STORAGE_KEY,
             JSON.stringify({
-              ...mergedLocal,
-              staff: nextStaffCleaned,
-              authAccounts: mergedAccounts,
+              ...stateRef.current,
+              _updatedAtMs: Date.now(),
             })
           );
-          safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(mergedLocal.kioskSettings));
-          saveStoredAuthAccounts(mergedAccounts);
-          setStaff(nextStaffCleaned);
-          setActiveBreaks(mergedLocal.activeBreaks);
-          setLogs(mergedLocal.logs);
-          setDeletedLogs(mergedLocal.deletedLogs);
-          setDeletedStaff(mergedLocal.deletedStaff || []);
-          if (mergedLocal.closedBreakIds) setClosedBreakIds(mergedLocal.closedBreakIds);
-          setKioskSettings(mergedLocal.kioskSettings);
-          setAuthAccounts(mergedAccounts);
+          safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(nextSettings));
+          saveStoredAuthAccounts(nextAccounts);
 
-          // Read-merge-write to Firebase Firestore so all devices worldwide receive updates immediately
-          void pushCloudStationSync({
-            authAccounts: mergedAccounts,
-            staff: nextStaffCleaned,
-            activeBreaks: mergedLocal.activeBreaks,
-            logs: mergedLocal.logs,
-            deletedLogs: mergedLocal.deletedLogs,
-            deletedStaff: mergedLocal.deletedStaff || [],
-            closedBreakIds: mergedLocal.closedBreakIds || [],
-            kioskSettings: mergedLocal.kioskSettings,
-            updatedByRole: 'station',
-            updatedAtMs: Date.now(),
-          }).then((mergedFromCloud) => {
-            if (mergedFromCloud) {
-              applyCloudSnapshotToLocal(mergedFromCloud);
-            }
-          });
+          setStaff(nextStaffCleaned);
+          setActiveBreaks(stateRef.current.activeBreaks);
+          setLogs(stateRef.current.logs);
+          setDeletedLogs(stateRef.current.deletedLogs);
+          setDeletedStaff(stateRef.current.deletedStaff);
+          setClosedBreakIds(stateRef.current.closedBreakIds);
+          setKioskSettings(nextSettings);
+          setAuthAccounts(nextAccounts);
+
+          // Write authoritative state directly to Firebase Firestore so all devices worldwide receive updates immediately
+          void pushCloudStationSync(
+            {
+              authAccounts: nextAccounts,
+              staff: nextStaffCleaned,
+              activeBreaks: stateRef.current.activeBreaks,
+              logs: stateRef.current.logs,
+              deletedLogs: stateRef.current.deletedLogs,
+              deletedStaff: stateRef.current.deletedStaff,
+              closedBreakIds: stateRef.current.closedBreakIds,
+              kioskSettings: nextSettings,
+              updatedByRole: 'station',
+              updatedAtMs: Date.now(),
+            },
+            false
+          );
         } catch {}
       }
 
@@ -620,8 +656,11 @@ export default function App() {
     }
   }, [applyCloudSnapshotToLocal]);
 
-  // 1. Initial Load & Persistence (localStorage + IndexedDB fallback for Android Chrome local files)
+  // 1. Initial Load & Persistence (Embedded HTML State -> localStorage -> IndexedDB fallback)
   useEffect(() => {
+    // First, check if this index.html file has a newer embedded state (from "Save Updated index.html")
+    syncEmbeddedHtmlStateToLocalStorage();
+
     const applyLoadedJson = (rawJson: string): boolean => {
       try {
         const parsed = JSON.parse(rawJson);
@@ -672,7 +711,7 @@ export default function App() {
 
     loadStorageWithIdbFallback(AUTH_ACCOUNTS_STORAGE_KEY).then((idbAuthRaw) => {
       let latestAccounts = getStoredAuthAccounts();
-      if (idbAuthRaw) {
+      if (!hasReceivedCloudSnapshotRef.current && idbAuthRaw) {
         try {
           const parsedAcc = JSON.parse(idbAuthRaw);
           if (Array.isArray(parsedAcc)) {
@@ -699,7 +738,7 @@ export default function App() {
               );
               if (matched) {
                 setLoggedInAccount(matched);
-                setSettingsPinUnlocked(true);
+                setSettingsPinUnlocked(matched.role !== 'Display');
               }
             }
           } catch {}
@@ -710,22 +749,7 @@ export default function App() {
     const saved = safeGetStorage(STORAGE_KEY) || safeGetStorage('washmen_break_tracker_v2');
     if (saved && applyLoadedJson(saved)) {
       isStorageHydratedRef.current = true;
-      // Also check if IndexedDB has a newer state or persisted kiosk lock on Android
-      loadStorageWithIdbFallback(STORAGE_KEY).then((idbRaw) => {
-        if (idbRaw && idbRaw !== saved) {
-          applyLoadedJson(idbRaw);
-        }
-      });
-      loadStorageWithIdbFallback(KIOSK_SETTINGS_STORAGE_KEY).then((idbSettingsRaw) => {
-        if (idbSettingsRaw) {
-          try {
-            const parsedS = JSON.parse(idbSettingsRaw);
-            if (parsedS && Number(parsedS.updatedAt || 0) > Number(stateRef.current.kioskSettings?.updatedAt || 0)) {
-              setKioskSettings({ ...DEFAULT_KIOSK_SETTINGS, ...parsedS });
-            }
-          } catch {}
-        }
-      });
+      // Only use IndexedDB fallback if localStorage was empty and cloud hasn't responded yet
       loadStorageWithIdbFallback(KIOSK_LOCK_STORAGE_KEY).then((lockVal) => {
         if (lockVal === 'true') {
           setIsKioskLockedState(true);
@@ -754,6 +778,7 @@ export default function App() {
       loadStorageWithIdbFallback(KIOSK_SETTINGS_STORAGE_KEY),
     ])
       .then(([idbRaw, idbSettingsRaw]) => {
+        if (hasReceivedCloudSnapshotRef.current) return;
         if (idbRaw) {
           applyLoadedJson(idbRaw);
         }
@@ -784,23 +809,28 @@ export default function App() {
 
   // 1b. Real-time Firebase Firestore subscription across all devices worldwide (runs unconditionally on boot)
   useEffect(() => {
+    const embeddedTs = syncEmbeddedHtmlStateToLocalStorage();
+
     const unsubscribeCloud = subscribeToCloudStationSync(
       (cloudData, exists) => {
         if (!exists || !cloudData) {
           const seedToCloud = () => {
             if (stateRef.current.staff.length > 0) {
-              void pushCloudStationSync({
-                authAccounts: stateRef.current.authAccounts,
-                staff: stateRef.current.staff,
-                activeBreaks: stateRef.current.activeBreaks,
-                logs: stateRef.current.logs,
-                deletedLogs: stateRef.current.deletedLogs,
-                deletedStaff: stateRef.current.deletedStaff,
-                closedBreakIds: stateRef.current.closedBreakIds,
-                kioskSettings: stateRef.current.kioskSettings,
-                updatedByRole: 'seed',
-                updatedAtMs: Date.now(),
-              });
+              void pushCloudStationSync(
+                {
+                  authAccounts: stateRef.current.authAccounts,
+                  staff: stateRef.current.staff,
+                  activeBreaks: stateRef.current.activeBreaks,
+                  logs: stateRef.current.logs,
+                  deletedLogs: stateRef.current.deletedLogs,
+                  deletedStaff: stateRef.current.deletedStaff,
+                  closedBreakIds: stateRef.current.closedBreakIds,
+                  kioskSettings: stateRef.current.kioskSettings,
+                  updatedByRole: 'seed',
+                  updatedAtMs: Date.now(),
+                },
+                false
+              );
             }
           };
           if (isStorageHydratedRef.current && stateRef.current.staff.length > 0) {
@@ -811,36 +841,62 @@ export default function App() {
           return;
         }
 
+        // If this HTML file has a newly embedded state (from "Save Updated index.html") newer than cloudData, push embedded state to Cloud!
+        if (embeddedTs > 0 && embeddedTs > Number(cloudData.updatedAtMs || 0)) {
+          void pushCloudStationSync(
+            {
+              authAccounts: stateRef.current.authAccounts,
+              staff: stateRef.current.staff,
+              activeBreaks: stateRef.current.activeBreaks,
+              logs: stateRef.current.logs,
+              deletedLogs: stateRef.current.deletedLogs,
+              deletedStaff: stateRef.current.deletedStaff || [],
+              closedBreakIds: stateRef.current.closedBreakIds || [],
+              kioskSettings: stateRef.current.kioskSettings,
+              updatedByRole: 'embedded-html-sync',
+              updatedAtMs: embeddedTs,
+            },
+            false
+          );
+          return;
+        }
+
         const localAccounts = stateRef.current.authAccounts;
         const localSettingsUpdated = Number(stateRef.current.kioskSettings?.updatedAt || 0);
         applyCloudSnapshotToLocal(cloudData);
 
-        // If this browser had a newer password/settings or cloud was missing the 3rd Display account / had legacy default passwords, push merged result to Firestore
+        // If this browser had a newer password/settings or cloud was missing the 3rd Display account / had older schemaVersion, push updated accounts to Firestore
         const hasLocalNewerPassword = localAccounts.some((lAcc) => {
           const cAcc = (cloudData.authAccounts || []).find((c) => c.id === lAcc.id);
-          return Number(lAcc.updatedAt || 0) > Number(cAcc?.updatedAt || 0);
+          return (
+            Number(lAcc.schemaVersion || 0) >= AUTH_SCHEMA_VERSION &&
+            Number(lAcc.updatedAt || 0) > Number(cAcc?.updatedAt || 0)
+          );
         });
         const cloudNeedsAccountUpgrade =
           !Array.isArray(cloudData.authAccounts) ||
           cloudData.authAccounts.length < 3 ||
           cloudData.authAccounts.some(
-            (c) => c.password === 'Manager@123' || c.password === 'Supervisor@123'
+            (c) => Number(c.schemaVersion || 0) < AUTH_SCHEMA_VERSION
           );
         const hasLocalNewerSettings =
           localSettingsUpdated > Number(cloudData.kioskSettings?.updatedAt || 0);
         if (hasLocalNewerPassword || cloudNeedsAccountUpgrade || hasLocalNewerSettings) {
-          void pushCloudStationSync({
-            authAccounts: stateRef.current.authAccounts,
-            staff: stateRef.current.staff,
-            activeBreaks: stateRef.current.activeBreaks,
-            logs: stateRef.current.logs,
-            deletedLogs: stateRef.current.deletedLogs,
-            deletedStaff: stateRef.current.deletedStaff || [],
-            closedBreakIds: stateRef.current.closedBreakIds || [],
-            kioskSettings: stateRef.current.kioskSettings,
-            updatedByRole: 'merge-sync',
-            updatedAtMs: Date.now(),
-          });
+          void pushCloudStationSync(
+            {
+              authAccounts: stateRef.current.authAccounts,
+              staff: stateRef.current.staff,
+              activeBreaks: stateRef.current.activeBreaks,
+              logs: stateRef.current.logs,
+              deletedLogs: stateRef.current.deletedLogs,
+              deletedStaff: stateRef.current.deletedStaff || [],
+              closedBreakIds: stateRef.current.closedBreakIds || [],
+              kioskSettings: stateRef.current.kioskSettings,
+              updatedByRole: 'merge-sync',
+              updatedAtMs: Date.now(),
+            },
+            false
+          );
         }
       },
       (connected) => {
@@ -924,13 +980,9 @@ export default function App() {
       if (e.key === STORAGE_KEY && e.newValue) {
         try {
           const incoming = JSON.parse(e.newValue);
-          const merged = mergeState(stateRef.current, incoming);
-          setStaff(merged.staff.filter((s) => !EXCLUDED_EMP_IDS.includes(String(s.empId))));
-          setActiveBreaks(merged.activeBreaks);
-          setLogs(merged.logs);
-          setDeletedLogs(merged.deletedLogs);
-          setDeletedStaff(merged.deletedStaff || []);
-          setKioskSettings(merged.kioskSettings);
+          if (incoming && typeof incoming === 'object') {
+            applyCloudSnapshotToLocal(incoming as CloudStationSyncPayload);
+          }
         } catch {}
       }
     };
@@ -1707,13 +1759,40 @@ export default function App() {
     }
   };
 
-  // Download standalone HTML file for Android Local File Storage & PC
+  // Download standalone HTML file for Android Local File Storage & GitHub Pages
   const downloadStandaloneHTML = async (
     preferShare: boolean = false,
     filename: string = 'index.html'
   ) => {
+    // Ensure current live state is flushed to storage and cloud before embedding into index.html
+    try {
+      safeSetStorage(
+        STORAGE_KEY,
+        JSON.stringify({
+          ...stateRef.current,
+          _updatedAtMs: Date.now(),
+        })
+      );
+      safeSetStorage(KIOSK_SETTINGS_STORAGE_KEY, JSON.stringify(stateRef.current.kioskSettings));
+      safeSetStorage(AUTH_ACCOUNTS_STORAGE_KEY, JSON.stringify(stateRef.current.authAccounts));
+      void pushCloudStationSync(
+        {
+          authAccounts: stateRef.current.authAccounts,
+          staff: stateRef.current.staff,
+          activeBreaks: stateRef.current.activeBreaks,
+          logs: stateRef.current.logs,
+          deletedLogs: stateRef.current.deletedLogs || [],
+          deletedStaff: stateRef.current.deletedStaff || [],
+          closedBreakIds: stateRef.current.closedBreakIds || [],
+          kioskSettings: stateRef.current.kioskSettings,
+          updatedByRole: loggedInAccount?.role || 'Manager',
+          updatedAtMs: Date.now(),
+        },
+        false
+      );
+    } catch {}
     await downloadSelfContainedHtml(preferShare, filename);
-    showToast(`Saved ${filename} (with your current settings & roster) for Android Local Chrome!`, 'success');
+    showToast(`Saved ${filename} (with your latest updates, settings & roster) for GitHub Pages & Android!`, 'success');
   };
 
   // Filtered Roster for Table
