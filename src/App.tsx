@@ -74,6 +74,8 @@ import {
   getShiftDailyAllowanceMins,
   getCountedMins,
   getCurrentShiftDate,
+  getShiftDate,
+  getLogShiftDate,
   getDailyBalance,
   calculateEmployeeMonthlyReport,
   pruneLogsOlderThanSixMonths,
@@ -101,8 +103,12 @@ import {
   resetAuthRateLimit,
   getVerifiedDeveloperMetadata,
   attachSafeCreditWatchdog,
-  WASHMEN_LOGO_FALLBACK
+  WASHMEN_LOGO_FALLBACK,
+  SyncableBreakLog,
+  AuditLogEntry
 } from './kioskTypes';
+import { appendAuditLogEntries, runShiftAndReportUnitTests } from './reportsDataAccess';
+import { DailyReportTab, WeeklyReportTab, RecalculateShiftDatesToolCard } from './DailyWeeklyReports';
 
 // Secondary independent character-code sequence for Udara Fernando
 const _APP_DEV_CODES: readonly number[] = [85, 100, 97, 114, 97, 32, 70, 101, 114, 110, 97, 110, 100, 111];
@@ -174,7 +180,10 @@ export interface ActiveBreak {
   shift: 'Morning' | 'Night';
   breakType: string;
   breakSlot?: 1 | 2 | 3;
+  slot?: 1 | 2 | 3;
   startTime: string; // ISO
+  startMs?: number;
+  shiftDate?: string; // YYYY-MM-DD (set when break starts)
   allottedMins: number;
   source?: 'kiosk' | 'supervisor';
   deviceTimestamp?: string;
@@ -189,14 +198,23 @@ export interface BreakLog {
   shift: 'Morning' | 'Night';
   breakType: string;
   breakSlot?: 1 | 2 | 3;
+  slot?: 1 | 2 | 3;
   startTime: string;
   endTime: string;
+  startMs?: number;
+  endMs?: number;
   durationMins: number;
+  actualMins?: number;
   allottedMins: number;
   varianceMins: number;
+  overtimeMins?: number;
   exceptionReason: string;
+  reason?: string;
   notes?: string;
   date: string; // YYYY-MM-DD
+  shiftDate?: string; // YYYY-MM-DD
+  month?: string; // YYYY-MM
+  shiftDateOverride?: boolean;
   countedMins?: number;
   source?: 'kiosk' | 'supervisor';
   voided?: boolean;
@@ -209,6 +227,8 @@ export interface BreakLog {
   deletedDate?: string;
   deletedBy?: string;
 }
+
+type AppTab = 'dashboard' | 'kiosk' | 'daily' | 'weekly' | 'roster' | 'logs' | 'report' | 'settings';
 
 const STORAGE_KEY = MAIN_STORAGE_KEY;
 
@@ -231,12 +251,14 @@ export default function App() {
   // Navigation & Shift (auto-detect Morning/Night from Asia/Dubai time)
   const [currentShift, setCurrentShift] = useState<'Morning' | 'Night'>(() => getDubaiTimeInfo(new Date()).autoShift);
   const [isKioskLocked, setIsKioskLockedState] = useState<boolean>(() => detectInitialKioskMode());
-  const [currentTab, setCurrentTabState] = useState<'dashboard' | 'kiosk' | 'roster' | 'logs' | 'report' | 'settings'>(() => {
+  const [currentTab, setCurrentTabState] = useState<AppTab>(() => {
     if (detectInitialKioskMode()) return 'kiosk';
     const savedTab = safeGetStorage(ACTIVE_TAB_STORAGE_KEY);
     if (
       savedTab === 'dashboard' ||
       savedTab === 'kiosk' ||
+      savedTab === 'daily' ||
+      savedTab === 'weekly' ||
       savedTab === 'roster' ||
       savedTab === 'logs' ||
       savedTab === 'report' ||
@@ -247,7 +269,7 @@ export default function App() {
     return 'dashboard';
   });
 
-  const setCurrentTab = useCallback((tab: 'dashboard' | 'kiosk' | 'roster' | 'logs' | 'report' | 'settings') => {
+  const setCurrentTab = useCallback((tab: AppTab) => {
     setCurrentTabState(tab);
     safeSetStorage(ACTIVE_TAB_STORAGE_KEY, tab);
   }, []);
@@ -395,6 +417,14 @@ export default function App() {
   const [fixLogReason, setFixLogReason] = useState<string>('Normal');
   const [fixLogCustomMinsStr, setFixLogCustomMinsStr] = useState<string>('');
   const [fixLogNotes, setFixLogNotes] = useState<string>('');
+  const [fixLogShiftDate, setFixLogShiftDate] = useState<string>('');
+
+  // Run unit verification tests once on boot
+  useEffect(() => {
+    try {
+      runShiftAndReportUnitTests();
+    } catch {}
+  }, []);
 
   // Monthly Report Filters
   const [reportMonth, setReportMonth] = useState<string>(() => getDubaiTimeInfo(new Date()).dateStr.slice(0, 7));
@@ -1138,16 +1168,21 @@ export default function App() {
 
       const effectiveAllottedMins = getEffectiveBreakMins(kioskSettings, configuredMins);
       const isTestBreak = Boolean(kioskSettings.testMode);
-      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const startShiftDate = getShiftDate(employee.shift, nowMs, kioskSettings);
       const newBreak: ActiveBreak = {
-        id: 'BRK_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        id: 'BRK_' + nowMs + '_' + Math.random().toString(36).slice(2, 6),
         staffId: employee.id,
         empId: employee.empId,
         staffName: employee.name,
         shift: employee.shift,
         breakType,
         breakSlot: resolvedSlot,
+        slot: resolvedSlot,
         startTime: nowIso,
+        startMs: nowMs,
+        shiftDate: startShiftDate,
         allottedMins: effectiveAllottedMins,
         source,
         deviceTimestamp: nowIso,
@@ -1222,8 +1257,18 @@ export default function App() {
       }
     ): BreakLog => {
       const now = new Date();
+      const endMs = now.getTime();
       const nowIso = now.toISOString();
-      const shiftDate = getCurrentShiftDate(brk.shift, now, kioskSettings);
+      const startMs =
+        typeof brk.startMs === 'number' && Number.isFinite(brk.startMs)
+          ? brk.startMs
+          : new Date(brk.startTime).getTime();
+      // Rule: shiftDate is set when the break STARTS (stored in activeBreak.shiftDate) and copied into the log when it stops
+      const shiftDate =
+        brk.shiftDate && /^\d{4}-\d{2}-\d{2}$/.test(brk.shiftDate)
+          ? brk.shiftDate
+          : getShiftDate(brk.shift, startMs, kioskSettings);
+      const month = shiftDate.slice(0, 7);
       const allotted = resolveAllottedMins(brk);
       const counted = options.voided
         ? 0
@@ -1231,26 +1276,34 @@ export default function App() {
         ? allotted
         : options.durationMins;
       const variance = options.voided ? 0 : counted - allotted;
-      const resolvedSlot = brk.breakSlot || resolveBreakSlot(brk.breakType, undefined, kioskSettings) || undefined;
+      const resolvedSlot = brk.breakSlot || brk.slot || resolveBreakSlot(brk.breakType, undefined, kioskSettings) || undefined;
       const isTestBreak = Boolean(brk.testMode || kioskSettings.testMode);
 
       const newLog: BreakLog = {
-        id: 'LOG_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        id: 'LOG_' + endMs + '_' + Math.random().toString(36).slice(2, 6),
         staffId: brk.staffId,
         empId: brk.empId,
         staffName: brk.staffName,
         shift: brk.shift,
         breakType: brk.breakType,
         breakSlot: resolvedSlot,
+        slot: resolvedSlot,
         startTime: brk.startTime,
         endTime: nowIso,
+        startMs,
+        endMs,
         durationMins: options.voided ? 0 : options.durationMins,
+        actualMins: options.voided ? 0 : options.durationMins,
         countedMins: counted,
         allottedMins: allotted,
         varianceMins: variance,
+        overtimeMins: Math.max(0, variance),
         exceptionReason: options.exceptionReason,
+        reason: options.exceptionReason,
         notes: options.notes,
         date: shiftDate,
+        shiftDate,
+        month,
         source: options.source,
         voided: Boolean(options.voided),
         needsReview: Boolean(options.needsReview),
@@ -1397,11 +1450,72 @@ export default function App() {
       setFixLogReason(log.voided ? 'Voided' : log.exceptionReason || 'Normal');
       setFixLogCustomMinsStr(String(getCountedMins(log, kioskSettings) || log.durationMins || log.allottedMins));
       setFixLogNotes(log.notes || '');
+      setFixLogShiftDate(getLogShiftDate(log, kioskSettings));
     },
     [kioskSettings]
   );
 
-  // Save Supervisor Fix / Void on an existing log (immediately updates counted minutes, balance, and daily overtime)
+  // Shared helper for updating a log from Daily Report Drawer or Supervisor Fix Modal (with audit trail)
+  const handleUpdateLogFromSupervisorFix = useCallback(
+    (
+      logId: string,
+      updates: {
+        voided?: boolean;
+        exceptionReason?: string;
+        countedMins?: number;
+        notes?: string;
+        newShiftDate?: string;
+      },
+      auditEntry?: AuditLogEntry
+    ) => {
+      const nextLogs = logs.map((l) => {
+        if (l.id !== logId) return l;
+        const isVoid = Boolean(updates.voided);
+        const allotted = resolveAllottedMins(l);
+        const nextCounted = isVoid
+          ? 0
+          : typeof updates.countedMins === 'number'
+          ? updates.countedMins
+          : getCountedMins(l, kioskSettings);
+        const prevShiftDate = getLogShiftDate(l, kioskSettings);
+        const nextShiftDate =
+          updates.newShiftDate && /^\d{4}-\d{2}-\d{2}$/.test(updates.newShiftDate)
+            ? updates.newShiftDate
+            : prevShiftDate;
+        const shiftDateChanged = nextShiftDate !== prevShiftDate;
+        return {
+          ...l,
+          voided: isVoid,
+          needsReview: false,
+          exceptionReason: isVoid
+            ? 'Voided by Supervisor (Minutes returned to balance)'
+            : updates.exceptionReason || l.exceptionReason,
+          reason: isVoid
+            ? 'Voided by Supervisor (Minutes returned to balance)'
+            : updates.exceptionReason || l.exceptionReason,
+          countedMins: nextCounted,
+          durationMins: isVoid ? 0 : nextCounted,
+          actualMins: isVoid ? 0 : nextCounted,
+          varianceMins: isVoid ? 0 : nextCounted - allotted,
+          overtimeMins: isVoid ? 0 : Math.max(0, nextCounted - allotted),
+          date: nextShiftDate,
+          shiftDate: nextShiftDate,
+          month: nextShiftDate.slice(0, 7),
+          shiftDateOverride: shiftDateChanged ? true : l.shiftDateOverride,
+          notes: updates.notes !== undefined ? updates.notes || l.notes : l.notes,
+        };
+      });
+
+      if (auditEntry) {
+        appendAuditLogEntries([auditEntry]);
+      }
+      setLogs(nextLogs);
+      serverSync({ logs: nextLogs });
+    },
+    [logs, kioskSettings, resolveAllottedMins, serverSync]
+  );
+
+  // Save Supervisor Fix / Void on an existing log (immediately updates counted minutes, shiftDate, balance, and daily overtime)
   const handleSaveFixedLog = (e: React.FormEvent) => {
     e.preventDefault();
     if (!fixLogModal) return;
@@ -1421,26 +1535,44 @@ export default function App() {
       nextCounted = !isNaN(parsedCustom) && parsedCustom >= 0 ? parsedCustom : fixLogModal.durationMins;
     }
 
-    const nextLogs = logs.map((l) => {
-      if (l.id !== fixLogModal.id) return l;
-      return {
-        ...l,
-        voided: isVoid,
-        needsReview: false,
-        exceptionReason: isVoid ? 'Voided by Supervisor (Minutes returned to balance)' : fixLogReason,
-        countedMins: nextCounted,
-        durationMins: isVoid ? 0 : nextCounted,
-        varianceMins: isVoid ? 0 : nextCounted - allotted,
-        notes: fixLogNotes.trim() || l.notes,
-      };
-    });
+    const oldShiftDate = getLogShiftDate(fixLogModal, kioskSettings);
+    const targetShiftDate =
+      fixLogShiftDate && /^\d{4}-\d{2}-\d{2}$/.test(fixLogShiftDate) ? fixLogShiftDate : oldShiftDate;
+    const shiftDateChanged = targetShiftDate !== oldShiftDate;
 
-    setLogs(nextLogs);
-    serverSync({ logs: nextLogs });
+    const auditRecord: AuditLogEntry = {
+      id: `AUD_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      action: shiftDateChanged ? 'shiftDate_fix' : 'supervisor_fix',
+      actorRole: loggedInAccount?.role || 'Supervisor',
+      timestampIso: new Date().toISOString(),
+      timestampMs: Date.now(),
+      affectedCount: 1,
+      logId: fixLogModal.id,
+      oldShiftDate,
+      newShiftDate: targetShiftDate,
+      details: `${fixLogModal.staffName} (#${fixLogModal.empId || ''}): ${
+        isVoid ? 'Voided break' : `Set reason="${fixLogReason}", counted=${nextCounted}m`
+      }${shiftDateChanged ? `, moved shiftDate ${oldShiftDate} -> ${targetShiftDate}` : ''}`,
+    };
+
+    handleUpdateLogFromSupervisorFix(
+      fixLogModal.id,
+      {
+        voided: isVoid,
+        exceptionReason: fixLogReason,
+        countedMins: nextCounted,
+        notes: fixLogNotes.trim(),
+        newShiftDate: targetShiftDate,
+      },
+      auditRecord
+    );
+
     setFixLogModal(null);
     showToast(
       isVoid
         ? `Voided ${fixLogModal.breakType} break for ${fixLogModal.staffName} — minutes returned to daily balance`
+        : shiftDateChanged
+        ? `Moved ${fixLogModal.staffName}'s break to shift date ${targetShiftDate} (${nextCounted}m counted)`
         : `Updated ${fixLogModal.breakType} break for ${fixLogModal.staffName} (${nextCounted}m counted)`,
       'success'
     );
@@ -2291,6 +2423,21 @@ export default function App() {
 
           {/* Shift Switcher, Sound, Active User Badge, Logout & Live Clock */}
           <div className="flex items-center flex-wrap gap-3">
+            {/* One-Tap Open Kiosk Button on Supervisor/Manager Header */}
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsPinUnlocked(false);
+                setIsKioskLocked(true);
+                setCurrentTab('kiosk');
+              }}
+              title="Open Employee Kiosk (Switch back and forth in one tap)"
+              className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs transition flex items-center space-x-1.5 shadow-sm cursor-pointer shrink-0"
+            >
+              <Tablet className="w-4 h-4 stroke-[2.5]" />
+              <span>Open Kiosk</span>
+            </button>
+
             {/* Shift Switcher */}
             <div className="bg-[#1C1466] p-1 rounded-xl border border-white/10 flex items-center space-x-1 shadow-inner">
               <button
@@ -2399,7 +2546,7 @@ export default function App() {
               )}
             </button>
 
-            {/* NEW TAB: EMPLOYEE KIOSK (Immediately freezes into Full-Screen Kiosk Mode) */}
+            {/* TAB: OPEN KIOSK (Immediately switches to Employee Kiosk; Supervisor/Manager has one-tap Live Dashboard button at top left) */}
             <button
               onClick={() => {
                 setSettingsPinUnlocked(false);
@@ -2409,10 +2556,48 @@ export default function App() {
               className="px-3.5 py-2 text-xs font-bold rounded-xl transition flex items-center space-x-2 shrink-0 cursor-pointer bg-emerald-50/80 text-emerald-800 border border-emerald-200 hover:bg-emerald-100"
             >
               <Tablet className="w-4 h-4" />
-              <span>Employee Kiosk</span>
+              <span>Open Kiosk</span>
               <span className="ml-1 px-1.5 py-0.5 text-[10px] font-black bg-emerald-600 text-white rounded-full uppercase">
                 Tablet
               </span>
+            </button>
+
+            {/* PART 3: DAILY REPORT TAB (Calendar + Selected Day + Month-to-Date) */}
+            <button
+              onClick={() => setCurrentTab('daily')}
+              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition flex items-center space-x-2 shrink-0 cursor-pointer ${
+                currentTab === 'daily'
+                  ? 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] shadow-xs'
+                  : 'text-[#5C5A85] hover:bg-[#F6F7FC] hover:text-[#171262]'
+              }`}
+            >
+              <Calendar className="w-4 h-4" />
+              <span>Daily Report</span>
+            </button>
+
+            {/* PART 4: WEEKLY REPORT TAB (13 Weeks + Cache + 3-Month Trend) */}
+            <button
+              onClick={() => setCurrentTab('weekly')}
+              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition flex items-center space-x-2 shrink-0 cursor-pointer ${
+                currentTab === 'weekly'
+                  ? 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] shadow-xs'
+                  : 'text-[#5C5A85] hover:bg-[#F6F7FC] hover:text-[#171262]'
+              }`}
+            >
+              <LayoutGrid className="w-4 h-4" />
+              <span>Weekly Report</span>
+            </button>
+
+            <button
+              onClick={() => setCurrentTab('report')}
+              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition flex items-center space-x-2 shrink-0 cursor-pointer ${
+                currentTab === 'report'
+                  ? 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] shadow-xs'
+                  : 'text-[#5C5A85] hover:bg-[#F6F7FC] hover:text-[#171262]'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Monthly Report</span>
             </button>
 
             <button
@@ -2436,19 +2621,7 @@ export default function App() {
               }`}
             >
               <FileSpreadsheet className="w-4 h-4" />
-              <span>Daily Break Logs ({validLogs.length})</span>
-            </button>
-
-            <button
-              onClick={() => setCurrentTab('report')}
-              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition flex items-center space-x-2 shrink-0 cursor-pointer ${
-                currentTab === 'report'
-                  ? 'bg-[#EEECFB] text-[#4D3FDC] border border-[#D5D0F9] shadow-xs'
-                  : 'text-[#5C5A85] hover:bg-[#F6F7FC] hover:text-[#171262]'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              <span>Monthly Report (26h)</span>
+              <span>Break Logs ({validLogs.length})</span>
             </button>
 
             <button
@@ -3546,7 +3719,47 @@ export default function App() {
               )}
             </div>
 
+            {/* Supervisor Tool: Recalculate Shift Dates (Preview & Batch Apply with Audit Log) */}
+            <RecalculateShiftDatesToolCard
+              logs={logs}
+              kioskSettings={kioskSettings}
+              loggedInRole={loggedInAccount.role}
+              onApplyRecalculatedLogs={(nextLogs: SyncableBreakLog[]) => {
+                setLogs(nextLogs as BreakLog[]);
+                serverSync({ logs: nextLogs as BreakLog[] });
+              }}
+              showToast={showToast}
+            />
+
           </div>
+        )}
+
+        {/* ================= PART 3 TAB: DAILY REPORT (CALENDAR + SELECTED DAY + MONTH-TO-DATE) ================= */}
+        {currentTab === 'daily' && (
+          <DailyReportTab
+            staff={staff}
+            logs={logs}
+            kioskSettings={kioskSettings}
+            currentShift={currentShift}
+            currentTime={currentTime}
+            loggedInRole={loggedInAccount.role}
+            onUpdateLogFromSupervisorFix={handleUpdateLogFromSupervisorFix}
+            onNavigateToMonthlyTab={() => setCurrentTab('report')}
+            showToast={showToast}
+          />
+        )}
+
+        {/* ================= PART 4 TAB: WEEKLY REPORT (13 WEEKS + CACHE + 3-MONTH TREND) ================= */}
+        {currentTab === 'weekly' && (
+          <WeeklyReportTab
+            staff={staff}
+            logs={logs}
+            kioskSettings={kioskSettings}
+            currentShift={currentShift}
+            currentTime={currentTime}
+            onNavigateToMonthlyTab={() => setCurrentTab('report')}
+            showToast={showToast}
+          />
         )}
 
         {/* ================= TAB 4: MONTHLY REPORT ================= */}
@@ -3952,6 +4165,18 @@ export default function App() {
                   onEnterLockedKiosk={() => {
                     setIsKioskLocked(true);
                     setCurrentTab('kiosk');
+                  }}
+                  showToast={showToast}
+                />
+
+                {/* Supervisor Tool: Recalculate Shift Dates (Preview & Batch Apply with Audit Log) */}
+                <RecalculateShiftDatesToolCard
+                  logs={logs}
+                  kioskSettings={kioskSettings}
+                  loggedInRole={loggedInAccount.role}
+                  onApplyRecalculatedLogs={(nextLogs: SyncableBreakLog[]) => {
+                    setLogs(nextLogs as BreakLog[]);
+                    serverSync({ logs: nextLogs as BreakLog[] });
                   }}
                   showToast={showToast}
                 />
@@ -5117,6 +5342,23 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              <div>
+                <label className="block text-xs font-bold text-[#171262] mb-1">
+                  Shift Date (Night Shift Day Rule — Supervisor Calendar Picker)
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="date"
+                    value={fixLogShiftDate}
+                    onChange={(e) => setFixLogShiftDate(e.target.value)}
+                    className="bg-white border-2 border-[#D5D0F9] rounded-xl px-3 py-2 text-xs font-mono font-black text-[#171262] focus:ring-2 focus:ring-[#4D3FDC]"
+                  />
+                  <span className="text-[11px] text-[#5C5A85]">
+                    Changes which shift day &amp; month (`YYYY-MM`) this break counts toward (writes an audit log).
+                  </span>
+                </div>
+              </div>
 
               <div>
                 <label className="block text-xs font-bold text-[#171262] mb-1">

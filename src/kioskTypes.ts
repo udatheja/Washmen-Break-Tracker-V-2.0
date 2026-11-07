@@ -44,6 +44,8 @@ export interface KioskSettings {
     Morning: number;
     Night: number;
   };
+  nightDayCutoffTime?: string; // HH:MM in Asia/Dubai, default '12:00'
+  weekStartDay?: 'Monday' | 'Sunday' | 'Saturday'; // default 'Monday'
   showLiveBalanceOnBreak?: boolean;
   calmWithinAllowanceMessage?: string;
   dailyOverAllowanceMessage?: string;
@@ -115,6 +117,8 @@ export const DEFAULT_KIOSK_SETTINGS: KioskSettings = {
     Morning: 60,
     Night: 60,
   },
+  nightDayCutoffTime: '12:00',
+  weekStartDay: 'Monday',
   showLiveBalanceOnBreak: true,
   calmWithinAllowanceMessage:
     'Please try to return on time. Your day total is still within your break time.',
@@ -178,7 +182,10 @@ export interface SyncableActiveBreak {
   shift: 'Morning' | 'Night';
   breakType: string;
   breakSlot?: 1 | 2 | 3;
+  slot?: 1 | 2 | 3;
   startTime: string;
+  startMs?: number;
+  shiftDate?: string;
   allottedMins: number;
   source?: 'kiosk' | 'supervisor';
   deviceTimestamp?: string;
@@ -193,14 +200,24 @@ export interface SyncableBreakLog {
   shift: 'Morning' | 'Night';
   breakType: string;
   breakSlot?: 1 | 2 | 3;
+  slot?: 1 | 2 | 3;
   startTime: string;
   endTime: string;
+  startMs?: number;
+  endMs?: number;
   durationMins: number;
+  actualMins?: number;
+  countedMins?: number;
   allottedMins: number;
   varianceMins: number;
+  overtimeMins?: number;
   exceptionReason: string;
+  reason?: string;
   notes?: string;
   date: string;
+  shiftDate?: string;
+  month?: string;
+  shiftDateOverride?: boolean;
   source?: 'kiosk' | 'supervisor';
   voided?: boolean;
   needsReview?: boolean;
@@ -211,6 +228,19 @@ export interface SyncableBreakLog {
   deletedAt?: string;
   deletedDate?: string;
   deletedBy?: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  action: 'shiftDate_fix' | 'recalculate_shift_dates_batch' | 'supervisor_fix';
+  actorRole: string;
+  timestampIso: string;
+  timestampMs: number;
+  details: string;
+  affectedCount: number;
+  logId?: string;
+  oldShiftDate?: string;
+  newShiftDate?: string;
 }
 
 export interface AppSyncState {
@@ -880,8 +910,110 @@ export function getNightShiftCycleDateStr(dateObj: Date, settings?: KioskSetting
  * Determines whether a completed BreakLog (or active break) belongs to the CURRENT active shift cycle
  * for its shift (Morning or Night), refreshing & refilling breaks 30 minutes before each shift starts.
  */
+/**
+ * Subtracts 1 calendar day from a YYYY-MM-DD string using pure calendar arithmetic
+ * (never affected by host device time zone or UTC offsets).
+ */
+export function subtractOneCalendarDay(yyyyMmDd: string): string {
+  const [yStr, mStr, dStr] = (yyyyMmDd || '').split('-');
+  const y = parseInt(yStr || '2026', 10);
+  const m = parseInt(mStr || '1', 10);
+  const d = parseInt(dStr || '1', 10);
+  const utcDate = new Date(Date.UTC(y, m - 1, d));
+  utcDate.setUTCDate(utcDate.getUTCDate() - 1);
+  const py = utcDate.getUTCFullYear();
+  const pm = String(utcDate.getUTCMonth() + 1).padStart(2, '0');
+  const pd = String(utcDate.getUTCDate()).padStart(2, '0');
+  return `${py}-${pm}-${pd}`;
+}
+
+/**
+ * Adds N calendar days (positive or negative) to a YYYY-MM-DD string using pure calendar arithmetic.
+ */
+export function addCalendarDays(yyyyMmDd: string, deltaDays: number): string {
+  const [yStr, mStr, dStr] = (yyyyMmDd || '').split('-');
+  const y = parseInt(yStr || '2026', 10);
+  const m = parseInt(mStr || '1', 10);
+  const d = parseInt(dStr || '1', 10);
+  const utcDate = new Date(Date.UTC(y, m - 1, d));
+  utcDate.setUTCDate(utcDate.getUTCDate() + deltaDays);
+  const ny = utcDate.getUTCFullYear();
+  const nm = String(utcDate.getUTCMonth() + 1).padStart(2, '0');
+  const nd = String(utcDate.getUTCDate()).padStart(2, '0');
+  return `${ny}-${nm}-${nd}`;
+}
+
+/**
+ * Returns the configured Night shift day cut-off time (HH:MM in Asia/Dubai, default '12:00').
+ */
+export function getNightDayCutoffHHMM(settings?: KioskSettings): string {
+  const raw = String(settings?.nightDayCutoffTime || '12:00').trim();
+  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(raw)) {
+    return raw;
+  }
+  return '12:00';
+}
+
+/**
+ * SINGLE PURE, TESTED FUNCTION: getShiftDate(staffShift, startMs, settings)
+ * Uses Intl.DateTimeFormat with timeZone: "Asia/Dubai" (never device time zone and never UTC).
+ *
+ * Rules:
+ * - Morning staff: shiftDate = the Asia/Dubai calendar date (YYYY-MM-DD) of the break start.
+ * - Night staff: if the Asia/Dubai local time of the break start is earlier than the Night day cut-off time
+ *   (default 12:00), shiftDate = the previous calendar date; otherwise the calendar date.
+ *   Example: Night break at 22:00 on 9 Nov -> 2026-11-09; Night breaks at 01:30 and 04:30 on 10 Nov -> 2026-11-09.
+ */
+export function getShiftDate(
+  staffShift: 'Morning' | 'Night',
+  startMs: number | string | Date = Date.now(),
+  settings?: KioskSettings
+): string {
+  let dateObj: Date;
+  if (startMs instanceof Date) {
+    dateObj = startMs;
+  } else if (typeof startMs === 'number') {
+    dateObj = new Date(startMs);
+  } else {
+    const asNum = Number(startMs);
+    dateObj = Number.isFinite(asNum) && asNum > 100000000000 ? new Date(asNum) : new Date(startMs);
+  }
+  if (Number.isNaN(dateObj.getTime())) {
+    dateObj = new Date();
+  }
+
+  const info = getDubaiTimeInfo(dateObj, settings);
+  if (staffShift === 'Morning') {
+    return info.dateStr;
+  }
+
+  // Night staff rule: compare Dubai local HH:MM against Night shift day cut-off time (default 12:00)
+  const cutoffHHMM = getNightDayCutoffHHMM(settings);
+  const cutoffMins = hhmmToMins(cutoffHHMM);
+  const dubaiMins = info.hour * 60 + info.minute;
+
+  if (dubaiMins < cutoffMins) {
+    return subtractOneCalendarDay(info.dateStr);
+  }
+  return info.dateStr;
+}
+
+/**
+ * Determines whether a completed BreakLog (or active break) belongs to the CURRENT active shiftDate
+ * for its shift (Morning or Night).
+ */
 export function isLogInCurrentShiftCycle(
-  log: { shift: 'Morning' | 'Night'; date?: string; startTime?: string; endTime?: string; voided?: boolean; deleted?: boolean },
+  log: {
+    shift: 'Morning' | 'Night';
+    date?: string;
+    shiftDate?: string;
+     shiftDateOverride?: boolean;
+    startTime?: string;
+    endTime?: string;
+    startMs?: number;
+    voided?: boolean;
+    deleted?: boolean;
+  },
   now: Date = new Date(),
   settings?: KioskSettings
 ): boolean {
@@ -890,62 +1022,27 @@ export function isLogInCurrentShiftCycle(
   // Check manual shift refill timestamp if supervisor triggered a manual refill
   const refillTs = Number(settings?.shiftRefillTimestamps?.[log.shift] || 0);
   if (refillTs > 0) {
-    const logTimeMs = Date.parse(log.endTime || log.startTime || '');
+    const logTimeMs = Number(log.startMs) || Date.parse(log.endTime || log.startTime || '');
     if (Number.isFinite(logTimeMs) && logTimeMs < refillTs) {
       return false;
     }
   }
 
-  const rawTs = log.startTime || log.endTime;
-
-  if (log.shift === 'Morning') {
-    const currentMorningCycle = getMorningShiftCycleDateStr(now, settings);
-    if (rawTs) {
-      const parsedMs = Date.parse(rawTs);
-      if (Number.isFinite(parsedMs)) {
-        const logMorningCycle = getMorningShiftCycleDateStr(new Date(parsedMs), settings);
-        return logMorningCycle === currentMorningCycle;
-      }
-    }
-    return log.date === currentMorningCycle;
-  }
-
-  // For Night Shift: compare Night Shift operational cycle dates (anchored at Night.start - 30 mins)
-  const currentNightCycle = getNightShiftCycleDateStr(now, settings);
-  if (rawTs) {
-    const parsedMs = Date.parse(rawTs);
-    if (Number.isFinite(parsedMs)) {
-      const logNightCycle = getNightShiftCycleDateStr(new Date(parsedMs), settings);
-      return logNightCycle === currentNightCycle;
-    }
-  }
-  return log.date === currentNightCycle;
+  const currentShiftDate = getShiftDate(log.shift, now, settings);
+  const logShiftDate = getLogShiftDate(log, settings);
+  return logShiftDate === currentShiftDate;
 }
 
 /**
  * Returns the operational shiftDate (YYYY-MM-DD) for a given shift and timestamp.
- * Rule: A Night Shift after midnight (00:00 to 11:59 AM Dubai time) belongs to the date the shift started (previous evening).
- * Morning Shift belongs to the Dubai calendar date (or Morning cycle date).
+ * Delegates directly to the pure getShiftDate(shift, startMs, settings) function.
  */
 export function getShiftDateForTimestamp(
   shift: 'Morning' | 'Night',
-  dateOrIso: Date | string = new Date(),
+  dateOrIso: Date | string | number = new Date(),
   settings?: KioskSettings
 ): string {
-  const dateObj = typeof dateOrIso === 'string' ? new Date(dateOrIso) : dateOrIso;
-  if (Number.isNaN(dateObj.getTime())) {
-    return getDubaiTimeInfo(new Date(), settings).dateStr;
-  }
-  if (shift === 'Morning') {
-    return getMorningShiftCycleDateStr(dateObj, settings);
-  }
-  // Night shift: any time after midnight before noon (00:00 - 11:59 AM Dubai time) belongs to the date the Night shift started
-  const info = getDubaiTimeInfo(dateObj, settings);
-  if (info.hour < 12) {
-    const prevDay = new Date(dateObj.getTime() - (info.hour * 60 + info.minute + 120) * 60 * 1000);
-    return getDubaiTimeInfo(prevDay, settings).dateStr;
-  }
-  return info.dateStr;
+  return getShiftDate(shift, dateOrIso, settings);
 }
 
 /**
@@ -956,40 +1053,42 @@ export function getCurrentShiftDate(
   now: Date = new Date(),
   settings?: KioskSettings
 ): string {
-  return getShiftDateForTimestamp(shift, now, settings);
+  return getShiftDate(shift, now, settings);
 }
 
 /**
- * Determines the shiftDate (YYYY-MM-DD) that a completed BreakLog belongs to.
- * A Night Shift log recorded after midnight belongs to the date the shift started.
+ * Determines the shiftDate (YYYY-MM-DD) that a completed BreakLog (or active break) belongs to.
+ * Respects supervisor manual shiftDateOverride first, then computes from startMs / startTime using getShiftDate.
  */
 export function getLogShiftDate(
-  log: { shift: 'Morning' | 'Night'; date?: string; startTime?: string; endTime?: string },
+  log: {
+    shift: 'Morning' | 'Night';
+    date?: string;
+    shiftDate?: string;
+    shiftDateOverride?: boolean;
+    startTime?: string;
+    endTime?: string;
+    startMs?: number;
+  },
   settings?: KioskSettings
 ): string {
-  const rawTs = log.startTime || log.endTime;
-  if (log.shift === 'Night' && rawTs) {
-    const parsedMs = Date.parse(rawTs);
-    if (Number.isFinite(parsedMs)) {
-      const d = new Date(parsedMs);
-      const info = getDubaiTimeInfo(d, settings);
-      // If log was recorded after midnight (00:00 - 11:59 AM) and log.date was stamped with the post-midnight date,
-      // attribute it to the evening date the Night Shift started.
-      if (info.hour < 12) {
-        const prevDateStr = getShiftDateForTimestamp('Night', d, settings);
-        if (!log.date || log.date === info.dateStr) {
-          return prevDateStr;
-        }
-      }
+  if (log.shiftDateOverride && log.shiftDate && /^\d{4}-\d{2}-\d{2}$/.test(log.shiftDate)) {
+    return log.shiftDate;
+  }
+  const rawStart = log.startMs || log.startTime || log.endTime;
+  if (rawStart) {
+    const parsedMs = typeof rawStart === 'number' ? rawStart : Date.parse(String(rawStart));
+    if (Number.isFinite(parsedMs) && parsedMs > 0) {
+      return getShiftDate(log.shift, parsedMs, settings);
     }
+  }
+  if (log.shiftDate && /^\d{4}-\d{2}-\d{2}$/.test(log.shiftDate)) {
+    return log.shiftDate;
   }
   if (log.date && /^\d{4}-\d{2}-\d{2}$/.test(log.date)) {
     return log.date;
   }
-  if (rawTs) {
-    return getShiftDateForTimestamp(log.shift, rawTs, settings);
-  }
-  return getDubaiTimeInfo(new Date(), settings).dateStr;
+  return getShiftDate(log.shift, new Date(), settings);
 }
 
 export interface DailyBalanceResult {
@@ -1129,13 +1228,15 @@ export interface EmployeeMonthlyReportMetrics {
 }
 
 /**
- * Computes an employee's Monthly Report metrics for a given YYYY-MM month using ONLY getDailyBalance
- * across each shiftDate present in that month (no stored balance fields, works on all existing logs).
+ * Computes an employee's report metrics across any date range [startDateStr, endDateStr] (inclusive)
+ * using ONLY getDailyBalance across each shiftDate present in that range.
+ * Shared by both the Monthly Report and the Weekly Report so definitions are 100% identical.
  */
-export function calculateEmployeeMonthlyReport(
+export function calculateEmployeeDateRangeReport(
   staffId: string,
   shift: 'Morning' | 'Night',
-  monthPrefix: string,
+  startDateStr: string,
+  endDateStr: string,
   logs: SyncableBreakLog[],
   settings?: KioskSettings
 ): EmployeeMonthlyReportMetrics {
@@ -1147,7 +1248,7 @@ export function calculateEmployeeMonthlyReport(
     if (!l || l.staffId !== staffId) continue;
     if (l.voided || l.deleted || l.testMode) continue;
     const sDate = getLogShiftDate(l, settings);
-    if (sDate.startsWith(monthPrefix)) {
+    if (sDate >= startDateStr && sDate <= endDateStr) {
       presentDatesSet.add(sDate);
       breaksCount += 1;
     }
@@ -1190,6 +1291,27 @@ export function calculateEmployeeMonthlyReport(
     daysOverAllowance,
     savedMins,
   };
+}
+
+/**
+ * Computes an employee's Monthly Report metrics for a given YYYY-MM month using ONLY getDailyBalance
+ * across each shiftDate present in that month (no stored balance fields, works on all existing logs).
+ */
+export function calculateEmployeeMonthlyReport(
+  staffId: string,
+  shift: 'Morning' | 'Night',
+  monthPrefix: string,
+  logs: SyncableBreakLog[],
+  settings?: KioskSettings
+): EmployeeMonthlyReportMetrics {
+  return calculateEmployeeDateRangeReport(
+    staffId,
+    shift,
+    `${monthPrefix}-01`,
+    `${monthPrefix}-31`,
+    logs,
+    settings
+  );
 }
 
 export function formatDubaiTimeShort(isoOrDate: string | Date): string {

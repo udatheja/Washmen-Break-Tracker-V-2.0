@@ -39,6 +39,8 @@ import {
   formatTime12h,
   isLogInCurrentShiftCycle,
   getCurrentShiftDate,
+  getShiftDate,
+  getLogShiftDate,
   getDailyBalance,
   getVerifiedDeveloperMetadata,
   attachSafeCreditWatchdog,
@@ -507,18 +509,29 @@ export default function EmployeeKiosk({
     });
   }, [shiftStaff, searchQuery]);
 
-  // Helper: get used break slots (1, 2, 3) for a staff member today
+  // Helper: get used break slots (1, 2, 3) for a staff member on their current shiftDate (Night shift after midnight uses shift start date)
   const getUsedSlotsForStaff = useCallback(
-    (staffId: string): Set<1 | 2 | 3> => {
-      const empLogs = todayValidLogs.filter((l) => l.staffId === staffId);
+    (staffId: string, staffShift?: 'Morning' | 'Night'): Set<1 | 2 | 3> => {
+      const emp = staff.find((s) => s.id === staffId);
+      const effectiveShift: 'Morning' | 'Night' = staffShift || emp?.shift || selectedShift;
+      const empShiftDate = getShiftDate(effectiveShift, now, kioskSettings);
+      const empLogs = logs.filter(
+        (l) =>
+          l.staffId === staffId &&
+          !l.voided &&
+          !l.deleted &&
+          !l.testMode &&
+          getLogShiftDate(l, kioskSettings) === empShiftDate &&
+          isLogInCurrentShiftCycle(l, now, kioskSettings)
+      );
       const set = new Set<1 | 2 | 3>();
       empLogs.forEach((l) => {
-        const slot = resolveBreakSlot(l.breakType, l.breakSlot, kioskSettings);
+        const slot = resolveBreakSlot(l.breakType, l.breakSlot || l.slot, kioskSettings);
         if (slot) set.add(slot);
       });
       return set;
     },
-    [todayValidLogs, kioskSettings]
+    [staff, selectedShift, now, kioskSettings, logs]
   );
 
   // Handle tapping an employee tile on Screen 1
@@ -532,7 +545,7 @@ export default function EmployeeKiosk({
       return;
     }
 
-    const usedSlots = getUsedSlotsForStaff(emp.id);
+    const usedSlots = getUsedSlotsForStaff(emp.id, emp.shift);
     const shiftSlots = getShiftBreakSlots(kioskSettings, emp.shift);
     const firstFree = shiftSlots.find((s) => !usedSlots.has(s.slot));
     if (!firstFree) {
@@ -607,7 +620,7 @@ export default function EmployeeKiosk({
     const savedMins = Math.max(0, allowed - usedMins);
 
     // Count how many of the 3 breaks are left today
-    const usedSlots = getUsedSlotsForStaff(activeBreak.staffId);
+    const usedSlots = getUsedSlotsForStaff(activeBreak.staffId, activeBreak.shift);
     const completedSlot = resolveBreakSlot(completedLog.breakType, completedLog.breakSlot, kioskSettings);
     if (completedSlot) usedSlots.add(completedSlot);
     const breaksLeft = Math.max(0, 3 - usedSlots.size);
@@ -755,43 +768,62 @@ export default function EmployeeKiosk({
     >
       {/* ================= TOP BAR: LOGO, TITLE, LIVE CLOCK (DUBAI TIME), SMALL LOCK ICON ================= */}
       <div className="bg-[#251B7C] text-white px-4 sm:px-6 py-4 border-b border-[#1E1668] shadow-md sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-          {/* Left: Static Kiosk Header (Frozen against accidental navigation; only returns to Kiosk Home if on a subscreen) */}
-          <div
-            onClick={() => {
-              if (screen.view !== 'home') goHome();
-            }}
-            className="min-h-[64px] flex items-center gap-3.5 text-left focus:outline-none"
-          >
-            <div className="w-14 h-14 rounded-2xl bg-[#17105C] border border-white/25 flex items-center justify-center shrink-0 shadow-inner pointer-events-none">
-              <img
-                src={getWashmenLogoSrc()}
-                alt="Washmen"
-                width={40}
-                height={40}
-                draggable={false}
-                className="w-10 h-10 object-contain pointer-events-none"
-                onError={(e) => {
-                  const img = e.target as HTMLImageElement;
-                  if (img.src !== WASHMEN_LOGO_FALLBACK) img.src = WASHMEN_LOGO_FALLBACK;
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4 flex-wrap">
+          {/* Left: Supervisor/Manager One-Tap Back Button (absent from DOM for Display role) + Kiosk Header */}
+          <div className="flex items-center gap-3 sm:gap-4">
+            {(loggedInRole === 'Supervisor' || loggedInRole === 'Manager') && !isDisplayOnlyUser && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goHome();
+                  onExitLockedKiosk();
                 }}
-              />
-            </div>
-            <div>
-              <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white leading-tight">
-                Wash &amp; Fold Break Station
-              </h1>
-              <p className="text-base text-indigo-100 font-bold flex flex-wrap items-center gap-1.5">
-                {selectedShift === 'Morning' ? (
-                  <Sun className="w-4 h-4 text-amber-300 shrink-0" />
-                ) : (
-                  <Moon className="w-4 h-4 text-cyan-300 shrink-0" />
-                )}
-                <span>
-                  {selectedShift} Shift ({formatTime12h(shiftTimings[selectedShift].start)} –{' '}
-                  {formatTime12h(shiftTimings[selectedShift].end)})
-                </span>
-              </p>
+                aria-label="Back to Live Dashboard"
+                title="Return directly to Supervisor Live Dashboard (No PIN needed)"
+                className="min-h-[56px] px-4 sm:px-5 py-2.5 rounded-2xl bg-amber-400 hover:bg-amber-300 text-slate-950 border-2 border-amber-200 font-black text-base sm:text-lg flex items-center gap-2 shadow-md cursor-pointer transition motion-reduce:transition-none shrink-0"
+              >
+                <ArrowLeft className="w-6 h-6 stroke-[2.75] shrink-0" />
+                <span>Live Dashboard</span>
+              </button>
+            )}
+
+            <div
+              onClick={() => {
+                if (screen.view !== 'home') goHome();
+              }}
+              className="min-h-[64px] flex items-center gap-3.5 text-left focus:outline-none"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-[#17105C] border border-white/25 flex items-center justify-center shrink-0 shadow-inner pointer-events-none">
+                <img
+                  src={getWashmenLogoSrc()}
+                  alt="Washmen"
+                  width={40}
+                  height={40}
+                  draggable={false}
+                  className="w-10 h-10 object-contain pointer-events-none"
+                  onError={(e) => {
+                    const img = e.target as HTMLImageElement;
+                    if (img.src !== WASHMEN_LOGO_FALLBACK) img.src = WASHMEN_LOGO_FALLBACK;
+                  }}
+                />
+              </div>
+              <div>
+                <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white leading-tight">
+                  Wash &amp; Fold Break Station
+                </h1>
+                <p className="text-base text-indigo-100 font-bold flex flex-wrap items-center gap-1.5">
+                  {selectedShift === 'Morning' ? (
+                    <Sun className="w-4 h-4 text-amber-300 shrink-0" />
+                  ) : (
+                    <Moon className="w-4 h-4 text-cyan-300 shrink-0" />
+                  )}
+                  <span>
+                    {selectedShift} Shift ({formatTime12h(shiftTimings[selectedShift].start)} –{' '}
+                    {formatTime12h(shiftTimings[selectedShift].end)})
+                  </span>
+                </p>
+              </div>
             </div>
           </div>
 
@@ -1052,9 +1084,9 @@ export default function EmployeeKiosk({
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {visibleStaff.map((emp) => {
                   const runningBreak = activeBreaks.find((b) => b.staffId === emp.id);
-                  const usedSlots = getUsedSlotsForStaff(emp.id);
+                  const usedSlots = getUsedSlotsForStaff(emp.id, emp.shift);
                   const allThreeDone = !runningBreak && usedSlots.size >= 3;
-                  const empShiftDate = getCurrentShiftDate(emp.shift, now, kioskSettings);
+                  const empShiftDate = getShiftDate(emp.shift, now, kioskSettings);
                   const bal = getDailyBalance(
                     emp.id,
                     empShiftDate,
@@ -1195,14 +1227,14 @@ export default function EmployeeKiosk({
             ...s,
             mins: getEffectiveBreakMins(kioskSettings, s.mins),
           }));
-          const usedSlots = getUsedSlotsForStaff(screen.employee.id);
+          const usedSlots = getUsedSlotsForStaff(screen.employee.id, screen.employee.shift);
           const activeSlotCfg =
             shiftSlots.find((s) => s.slot === selectedSlotNumber && !usedSlots.has(s.slot)) ||
             shiftSlots.find((s) => !usedSlots.has(s.slot)) ||
             shiftSlots[0];
           const empBal = getDailyBalance(
             screen.employee.id,
-            getCurrentShiftDate(screen.employee.shift, now, kioskSettings),
+            getShiftDate(screen.employee.shift, now, kioskSettings),
             logs,
             null,
             now,
@@ -1506,9 +1538,13 @@ export default function EmployeeKiosk({
             screen.completedLog,
             ...logs.filter((l) => l.id !== screen.completedLog.id),
           ];
+          const completedShiftDate =
+            screen.completedLog.shiftDate ||
+            screen.completedLog.date ||
+            getShiftDate(screen.completedLog.shift, now, kioskSettings);
           const dayBal = getDailyBalance(
             screen.completedLog.staffId,
-            getCurrentShiftDate(screen.completedLog.shift, now, kioskSettings),
+            completedShiftDate,
             logsWithCurrent,
             null,
             now,

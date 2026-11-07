@@ -111,6 +111,12 @@ export default function KioskSettingsCard({
   );
   const [maxSimulStr, setMaxSimulStr] = useState<string>(String(kioskSettings.maxSimultaneousBreaks ?? 5));
   const [autoReturnStr, setAutoReturnStr] = useState<string>(String(kioskSettings.autoReturnSecs ?? 30));
+  const [nightCutoffStr, setNightCutoffStr] = useState<string>(
+    String(kioskSettings.nightDayCutoffTime || DEFAULT_KIOSK_SETTINGS.nightDayCutoffTime || '12:00')
+  );
+  const [weekStartDay, setWeekStartDay] = useState<'Monday' | 'Sunday' | 'Saturday'>(
+    kioskSettings.weekStartDay || DEFAULT_KIOSK_SETTINGS.weekStartDay || 'Monday'
+  );
 
   const [positiveText, setPositiveText] = useState<string>(
     (kioskSettings.positiveMessages || DEFAULT_KIOSK_SETTINGS.positiveMessages).join('\n')
@@ -169,6 +175,10 @@ export default function KioskSettingsCard({
       setNeedsReviewMinsStr(String(kioskSettings.needsReviewRunningMins ?? 90));
       setMaxSimulStr(String(kioskSettings.maxSimultaneousBreaks ?? 5));
       setAutoReturnStr(String(kioskSettings.autoReturnSecs ?? 30));
+      setNightCutoffStr(
+        String(kioskSettings.nightDayCutoffTime || DEFAULT_KIOSK_SETTINGS.nightDayCutoffTime || '12:00')
+      );
+      setWeekStartDay(kioskSettings.weekStartDay || DEFAULT_KIOSK_SETTINGS.weekStartDay || 'Monday');
       setPositiveText((kioskSettings.positiveMessages || DEFAULT_KIOSK_SETTINGS.positiveMessages).join('\n'));
       setWarningText((kioskSettings.warningMessages || DEFAULT_KIOSK_SETTINGS.warningMessages).join('\n'));
       setCalmMessageStr(
@@ -374,6 +384,12 @@ export default function KioskSettingsCard({
 
     const parsedMaxSimul = parseWholeNumberInRange(maxSimulStr, 1, 40) ?? 5;
     const parsedAutoReturn = parseWholeNumberInRange(autoReturnStr, 10, 300) ?? 30;
+    const trimmedCutoff = nightCutoffStr.trim() || '12:00';
+    if (!/^([01]\d|2[0-3]):([0-5]\d)$/.test(trimmedCutoff)) {
+      setValidationError('Please enter a valid Night shift day cut-off time in HH:MM format (e.g. 12:00)');
+      showToast('Please enter a valid Night shift day cut-off time (HH:MM)', 'danger');
+      return;
+    }
 
     const morningSlots: [ShiftBreakSlotConfig, ShiftBreakSlotConfig, ShiftBreakSlotConfig] = [
       {
@@ -432,6 +448,8 @@ export default function KioskSettingsCard({
       needsReviewRunningMins: parsedNeedsReview,
       maxSimultaneousBreaks: parsedMaxSimul,
       autoReturnSecs: parsedAutoReturn,
+      nightDayCutoffTime: trimmedCutoff,
+      weekStartDay,
       dailyAllowanceMins: {
         Morning: parsedMorningAllowance,
         Night: parsedNightAllowance,
@@ -511,6 +529,8 @@ export default function KioskSettingsCard({
     setNeedsReviewMinsStr('90');
     setMaxSimulStr('5');
     setAutoReturnStr('30');
+    setNightCutoffStr('12:00');
+    setWeekStartDay('Monday');
     setPositiveText(DEFAULT_KIOSK_SETTINGS.positiveMessages.join('\n'));
     setWarningText(DEFAULT_KIOSK_SETTINGS.warningMessages.join('\n'));
     setCalmMessageStr(
@@ -867,6 +887,68 @@ export default function KioskSettingsCard({
                     className="w-full bg-white border border-[#C7C2F5] rounded-lg px-2.5 py-1.5 font-mono font-bold text-xs text-[#171262]"
                   />
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Night Shift Day Cut-Off Time & Week Starts On (Supervisor Rules for Daily & Weekly Reports) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            <div className="p-3.5 rounded-xl bg-white border-2 border-[#C7C2F5] space-y-1.5">
+              <span className="font-black text-[#171262] text-xs flex items-center gap-1.5">
+                <Moon className="w-4 h-4 text-[#4D3FDC]" />
+                <span>Night shift day cut-off time (Asia/Dubai, default 12:00)</span>
+              </span>
+              <p className="text-[11px] text-[#5C5A85]">
+                Night-shift breaks started before this local Dubai time belong to the previous calendar date (the evening the shift started).
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="time"
+                  value={nightCutoffStr}
+                  onChange={(e) => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setNightCutoffStr(e.target.value || '12:00');
+                  }}
+                  aria-label="Night shift day cut-off time"
+                  className="bg-[#F8F9FE] border-2 border-[#4D3FDC] rounded-lg px-3 py-1.5 font-mono font-black text-xs text-[#171262]"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSavedNotice(null);
+                    setValidationError(null);
+                    setNightCutoffStr('12:00');
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-[#EEECFB] hover:bg-[#4D3FDC] text-[#4D3FDC] hover:text-white font-bold text-[11px] transition cursor-pointer"
+                >
+                  Default (12:00)
+                </button>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-white border-2 border-[#C7C2F5] space-y-1.5">
+              <span className="font-black text-[#171262] text-xs flex items-center gap-1.5">
+                <Clock className="w-4 h-4 text-[#4D3FDC]" />
+                <span>Week starts on (Weekly Report, default Monday)</span>
+              </span>
+              <p className="text-[11px] text-[#5C5A85]">
+                Sets the starting day of each 7-day week in the Weekly Report tab (13-week selector).
+              </p>
+              <div className="pt-1">
+                <select
+                  value={weekStartDay}
+                  onChange={(e) => {
+                    setSavedNotice(null);
+                    setWeekStartDay(e.target.value as 'Monday' | 'Sunday' | 'Saturday');
+                  }}
+                  aria-label="Week starts on"
+                  className="w-full sm:w-auto bg-[#F8F9FE] border-2 border-[#4D3FDC] rounded-lg px-3 py-1.5 font-bold text-xs text-[#171262]"
+                >
+                  <option value="Monday">Monday (Mon – Sun)</option>
+                  <option value="Sunday">Sunday (Sun – Sat)</option>
+                  <option value="Saturday">Saturday (Sat – Fri)</option>
+                </select>
               </div>
             </div>
           </div>
