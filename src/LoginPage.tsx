@@ -44,7 +44,6 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string>('');
-  const [showCredentialsGuide, setShowCredentialsGuide] = useState<boolean>(false);
   const [creatorModalOpen, setCreatorModalOpen] = useState<boolean>(false);
 
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
@@ -245,13 +244,7 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
 
             <div className="pt-3 border-t border-white/10 flex items-center justify-between text-[11px] text-indigo-200">
               <span>PC, Tablet &amp; Android Local Ready</span>
-              <button
-                type="button"
-                onClick={() => setShowCredentialsGuide(!showCredentialsGuide)}
-                className="text-cyan-300 hover:text-white font-bold underline cursor-pointer"
-              >
-                {showCredentialsGuide ? 'Hide Login Help' : 'Login Help'}
-              </button>
+              <span>Authorized Personnel Only</span>
             </div>
           </div>
 
@@ -336,47 +329,6 @@ export function LoginPage({ accounts, currentTime, onLoginSuccess }: LoginPagePr
                 </span>
               </button>
             </form>
-
-            {/* Collapsible Credentials & Password Reset Info */}
-            {showCredentialsGuide && (
-              <div className="p-4 rounded-2xl bg-[#F8F9FE] border border-[#D5D0F9] space-y-2.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-black text-[#171262]">
-                    Default Login Roles
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowCredentialsGuide(false)}
-                    className="text-[#5C5A85] hover:text-[#171262] cursor-pointer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-                <div className="space-y-1.5 text-[11px]">
-                  {accounts.map((a) => {
-                    const isDefault = a.password === a.defaultPassword;
-                    return (
-                      <div
-                        key={a.id}
-                        className="flex flex-wrap items-center justify-between bg-white px-2.5 py-1.5 rounded-lg border border-[#E4E7F2]"
-                      >
-                        <div>
-                          <strong className="text-[#171262]">{a.role} Login:</strong>{' '}
-                          <span className="font-mono text-[#4D3FDC]">({a.username})</span>
-                        </div>
-                        <span className="font-mono font-bold text-[#5C5A85]">
-                          {isDefault ? `Default PW: ${a.defaultPassword}` : 'Custom password active'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="text-[11px] text-[#5C5A85] leading-relaxed">
-                  To change or reset either password, sign in and open the{' '}
-                  <strong className="text-[#171262]">Settings &amp; Backup</strong> tab.
-                </p>
-              </div>
-            )}
 
             <div className="pt-2 border-t border-[#E4E7F2] text-[11px] text-[#5C5A85] flex items-center justify-between">
               <span>Need to reset a password?</span>
